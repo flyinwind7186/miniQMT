@@ -124,6 +124,14 @@ web2.0 用「三级开关总览」面板（`TierSwitches.vue`，位于参数面�
 
 实现见 `web2.0/src/utils/freshness.ts`。
 
+### 行情源健康与休市空区间
+
+Flask 直连模式可通过 `GET /api/market/health` 查看内存中的行情源健康快照。该快照与上面的前端数据新鲜度是两套指标：前者衡量 xtdata、Tushare、Mootdx 的请求质量，后者衡量页面最后一次成功刷新距今多久。
+
+Tushare 历史查询成功但指定区间没有交易数据时，健康事件记为 `reason=no_data`、`ok=true`，不会累计连续失败或进入冷却。常见场景是周末或法定休市后首个交易日，历史库已更新到前一交易日，而待补区间全部为休市日。`no_data` 表示“请求成功、没有可写入日线”，不表示接口不可用；`None`、超时和异常才属于失败。
+
+该健康接口目前仅由 Flask 直连提供；xtquant_manager 的 `/api/v1/health` 反映网关与账号连接状态，不是行情源评分。完整响应结构见 [Web API · 行情源健康](web-api.md#market-health)。
+
 ### 轮询节奏
 
 轮询**不因任何业务开关而停止**（旧版「停止自动操作」会连带停掉数据刷新），

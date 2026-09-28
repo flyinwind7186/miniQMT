@@ -246,22 +246,62 @@ class TestTushareHistoryData(TestBase):
         self.assertEqual(kwargs['end_date'], '20260702')
 
     def test_download_history_empty_data_returns_none(self):
-        """空 DataFrame 返回 None"""
+        """节假日区间返回空 DataFrame 时应视为成功但无数据。"""
         mock_pro = MagicMock()
         mock_pro.daily.return_value = pd.DataFrame()
         self._mock_tushare_pro(mock_pro)
+        self.dm._ts_consecutive_failures = 2
 
-        df = self.dm._download_history_tushare('000001.SZ')
+        with patch('data_manager.logger') as mock_logger:
+            df = self.dm._download_history_tushare(
+                '000001.SZ',
+                start_date='20260925',
+                end_date='20260927',
+            )
+
         self.assertIsNone(df)
+        self.assertEqual(self.dm._ts_consecutive_failures, 0)
+        self.assertEqual(self.dm._ts_cooldown_until, 0.0)
+        mock_logger.warning.assert_not_called()
+
+        health = self.dm.market_health.get_score(
+            source='Tushare', purpose='history', stock_code='000001.SZ'
+        )
+        self.assertEqual(health['success_count'], 1)
+        self.assertEqual(health['failure_count'], 0)
+        self.assertEqual(health['last_reason'], 'no_data')
 
     def test_download_history_none_data_returns_none(self):
-        """daily() 返回 None 时降级"""
+        """daily() 异常返回 None 时降级并计为失败。"""
         mock_pro = MagicMock()
         mock_pro.daily.return_value = None
         self._mock_tushare_pro(mock_pro)
 
         df = self.dm._download_history_tushare('000001.SZ')
         self.assertIsNone(df)
+        self.assertEqual(self.dm._ts_consecutive_failures, 1)
+
+        health = self.dm.market_health.get_score(
+            source='Tushare', purpose='history', stock_code='000001.SZ'
+        )
+        self.assertEqual(health['failure_count'], 1)
+        self.assertEqual(health['last_reason'], 'none')
+
+    def test_download_history_filtered_empty_resets_failures(self):
+        """接口成功但筛选后无新增记录时应重置既有失败状态。"""
+        mock_pro = self._make_mock_pro()
+        self._mock_tushare_pro(mock_pro)
+        self.dm._ts_consecutive_failures = 2
+
+        df = self.dm._download_history_tushare(
+            '000001.SZ',
+            start_date='20260703',
+            end_date='20260704',
+        )
+
+        self.assertIsNone(df)
+        self.assertEqual(self.dm._ts_consecutive_failures, 0)
+        self.assertEqual(self.dm._ts_cooldown_until, 0.0)
 
     def test_download_history_records_market_health(self):
         """验证健康评分记录"""

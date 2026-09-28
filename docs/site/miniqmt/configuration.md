@@ -370,7 +370,7 @@ DYNAMIC_TAKE_PROFIT = [
 | `BAOSTOCK_RETRY_COOLDOWN` | `300` | baostock 连续失败后冷却时间（秒） |
 | `BAOSTOCK_MAX_CONSECUTIVE_FAILURES` | `3` | 连续失败达到阈值后进入冷却期 |
 
-历史数据源策略分模式处理：标准模式（`ENABLE_XTQUANT_MANAGER=False`）为 `Tushare（日/周/月）→ Mootdx`，分钟线直接走 Mootdx；网关模式会先尝试 `xtdata`，失败或为空后再进入 `Tushare → Mootdx`。baostock 默认不参与常规行情/名称路径。历史日期会做格式规范化和范围过滤，异常或空数据会降级跳过而不阻塞主循环。
+历史数据源策略分模式处理：标准模式（`ENABLE_XTQUANT_MANAGER=False`）为 `Tushare（日/周/月）→ Mootdx`，分钟线直接走 Mootdx；网关模式会先尝试 `xtdata`，失败或为空后再进入 `Tushare → Mootdx`。baostock 默认不参与常规行情/名称路径。历史日期会做格式规范化和范围过滤；接口异常会进入失败冷却，成功响应但没有交易数据则按 `no_data` 降级，不阻塞主循环也不累计失败。
 
 ### 股票代码与交易所后缀规则  [v3.8.9]
 
@@ -402,6 +402,9 @@ miniQMT 内部统一使用 `000001.SZ` / `600036.SH` / `920118.BJ` 格式。用�
 
 !!! tip "日期入参自动归一化"
     Tushare `daily` 接口要求 `YYYYMMDD`，但项目内部（含盘中补齐历史数据的调用方）会传 `YYYY-MM-DD`。`DataManager._format_tushare_date()` 在请求前统一转换：带 `-` 的按 `%Y-%m-%d` 解析，否则抽取前 8 位数字；无法识别时返回 `None` 并回落到默认区间（近 365 天 / 今天）。此前直接透传导致 Tushare 返回空集，静默降级到 Mootdx。
+
+!!! note "休市区间返回空表不是接口故障  [2026-09-29]"
+    周末或法定休市后首个交易日，增量区间可能完全不含交易日。Tushare 此时会成功返回空 `DataFrame`；系统将其记录为健康事件 `reason=no_data`，清零已有连续失败计数并继续降级链，不触发 `TUSHARE_RETRY_COOLDOWN`。只有返回 `None`、超时或抛出异常才计为接口失败。日期过滤后没有新增记录同样按 `no_new_data` 成功处理。
 
 新版 baostock(0.9.x) 收紧了访问格式与行为，本项目已统一适配（见 [baostock_helper.py](https://github.com/weihong-su/miniQMT/blob/main/baostock_helper.py)）：登录前自动应用 `BAOSTOCK_API_KEY`（旧版 0.8.x 无 `set_API_key` 时自动跳过、匿名访问），复权类型归一化为 baostock 接受的 `'1'/'2'/'3'`，登录/查询错误码显式校验并对激活/权限类错误补充可读提示，且 baostock 失败时自动降级到 Mootdx，不阻塞主循环。依赖约束为 `baostock>=0.9.1`（仅在显式开启 baostock 功能时需要）。
 

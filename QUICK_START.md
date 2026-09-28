@@ -174,7 +174,7 @@ python test/run_integration_regression_tests.py --all --verbose        # 详细�
 
 测试报告：`test/integration_test_report.md`
 
-当前回归配置包含 37 个测试组（含 `fast` 快速子集）。`--all` 默认排除重复的 `fast` 组，`--all-with-fast` 会连同快速子集一起运行；最近一次（2026-09-19, v3.9.3）使用 Anaconda `python39` 实测为 37 组、154 个模块、3248 个用例，100% 通过。
+当前回归配置包含 37 个测试组（含 `fast` 快速子集）。`--all` 默认排除重复的 `fast` 组，`--all-with-fast` 会连同快速子集一起运行；最近一次（2026-09-29, Unreleased）使用 Anaconda `python39` 实测为 37 组、157 个模块、3408 个用例，3408 通过、0 失败、0 错误，成功率 100%。
 
 ### 单个测试文件
 

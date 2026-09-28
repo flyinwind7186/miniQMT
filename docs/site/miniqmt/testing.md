@@ -4,12 +4,13 @@
 
 项目测试代码位于 [test/](https://github.com/weihong-su/miniQMT/tree/main/test) 目录，使用标准 `unittest`。当前回归配置见 `test/integration_test_config.json`，包含 37 个测试组（含 `fast` 快速子集）。
 
-最近一次（2026-09-19, v3.9.3）使用 Anaconda `python39` 执行 `--all-with-fast` 实测：**37 组、154 模块、3248 用例、3248 通过、0 失败、0 错误、0 跳过，成功率 100%**。
+最近一次（2026-09-29, Unreleased）使用 Anaconda `python39` 执行 `--all-with-fast` 实测：**37 组、157 模块、3408 用例、3408 通过、0 失败、0 错误、0 跳过，成功率 100%**，耗时 1041.57 秒。
 
 ## 测试统计速查
 
-| 版本 | 日期 | 非fast组 | 含fast | 通过率 |
+| 版本 | 日期 | 回归规模（含 fast） | 通过用例 | 通过率 |
 |------|------|----------|--------|--------|
+| Unreleased | 2026-09-29 | 37 组, 157 模块, 3408 用例 | 3408 | 100% |
 | v3.9.3 | 2026-09-19 | 37 组, 154 模块, 3248 用例 | 3248 | 100% |
 | v3.9.2 | 2026-09-14 | 36 组, 148 模块, 3166 用例 | 3166 | 100% |
 | v3.9.1 | 2026-09-12 | 36 组, 146 模块, 3126 用例 | 3126 | 100% |
@@ -131,7 +132,7 @@ python test/run_all_grid_tests.py
 | `launcher_deployment` | high | 总控制台环境检查与配置校验 |
 | `db_thread_safety` | critical | 数据库线程安全验证 |
 | `dual_layer_storage` | critical | 内存 + SQLite 双层存储一致性 |
-| `xtdata_data_source` | high | xtdata 动态订阅、Mootdx fallback、股票名称解析、行情源健康评分 |
+| `xtdata_data_source` | high | xtdata 动态订阅、Mootdx fallback、Tushare 休市空区间、股票名称解析、行情源健康评分 |
 | `indicator_calculator` | high | 技术指标计算器全方法验证 |
 | `grid_qa_gap_supplement` | critical | 网格 QA 缺口补充 |
 | `grid_full_range_coverage` | critical | 全网格价格区间覆盖（114 个用例，A-K 11 个套件） |
@@ -141,7 +142,7 @@ python test/run_all_grid_tests.py
 | `qmt_rpc` | high | 大QMT RPC 交易后端契约、只读门禁、回调和委托映射 |
 | `simulation_trading_e2e` | critical | 模拟交易模式端到端（核心链路 / Web 下单 / 策略四分支 / 模式切换） |
 | `p1_fixes` | high | 重连缓存刷新 / QMT 自恢复探测 / 信号保活与时效兜底 / 超时泄漏可观测 |
-| `fast` | critical | 5 分钟快速验证子集（当前 54 个模块、1345 个用例） |
+| `fast` | critical | 5 分钟快速验证子集（当前 56 个模块、1394 个用例） |
 
 ---
 

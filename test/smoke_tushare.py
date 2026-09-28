@@ -1,13 +1,18 @@
-"""Tushare 真实 API 冒烟测试"""
-import os, sys
+"""Tushare 真实 API 冒烟测试。"""
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-os.environ["TUSHARE_TOKEN"] = "153fb8b315efd11f41f0798d7323f6502735362e119b320999da6f46"
-os.environ["ENABLE_TUSHARE_DATA_SOURCE"] = "true"
-
 import config
+
+if not config.ENABLE_TUSHARE_DATA_SOURCE:
+    raise SystemExit("ENABLE_TUSHARE_DATA_SOURCE 未开启")
+if not config.TUSHARE_TOKEN:
+    raise SystemExit("未配置 TUSHARE_TOKEN")
+
 print(f"1) config.ENABLE_TUSHARE_DATA_SOURCE = {config.ENABLE_TUSHARE_DATA_SOURCE}")
-print(f"   config.TUSHARE_TOKEN = ***{config.TUSHARE_TOKEN[-8:] if config.TUSHARE_TOKEN else '空'}")
+print("   config.TUSHARE_TOKEN = 已配置")
 
 # 测试 Tushare raw API
 import tushare as ts

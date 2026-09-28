@@ -88,6 +88,9 @@ miniQMT 提供 RESTful API。Flask 直连模式暴露完整 web1.0 API；xtquant
 !!! note "网关能力边界"
     该接口目前由 Flask 直连模式提供；xtquant_manager 网关的 `/api/v1/health` 是网关账号连接健康，不等同于 miniQMT 的行情源健康评分。
 
+!!! info "Tushare `no_data` 语义  [2026-09-29]"
+    历史查询成功但区间内没有交易日时，Tushare 健康事件返回 `ok=true`、`reason=no_data`，不会累计连续失败或触发冷却。日期范围过滤后没有新增记录使用 `reason=no_new_data`。只有返回 `None`、超时或异常才计入 `failure_count`；前端或监控程序不应把 `no_data` 解释为数据源离线。
+
 ---
 
 ## 持仓与交易记录

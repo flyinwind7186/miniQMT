@@ -1744,10 +1744,19 @@ class DataManager:
 
             latency_ms = int((time.time() - start_ts) * 1000)
 
-            if df is None or df.empty:
-                self._record_market_health("Tushare", "history", stock_code, False, latency_ms, reason="empty")
+            if df is None:
+                self._record_market_health("Tushare", "history", stock_code, False, latency_ms, reason="none")
                 self._ts_consecutive_failures += 1
                 self._check_tushare_cooldown()
+                return None
+
+            if df.empty:
+                self._ts_consecutive_failures = 0
+                self._ts_cooldown_until = 0.0
+                self._record_market_health("Tushare", "history", stock_code, True, latency_ms, reason="no_data")
+                logger.debug(
+                    f"Tushare: {stock_code} 查询区间无交易数据(start={ts_start}, end={ts_end})"
+                )
                 return None
 
             # 列重命名：Tushare daily/fund_daily 返回 trade_date, open, high, low, close, vol, amount
@@ -1774,6 +1783,8 @@ class DataManager:
             df = self._filter_history_date_range(df, start_date=start_date, end_date=end_date)
             if df.empty:
                 logger.debug(f"Tushare: {stock_code} 历史数据无新增记录(start={ts_start}, end={ts_end})")
+                self._ts_consecutive_failures = 0
+                self._ts_cooldown_until = 0.0
                 self._record_market_health("Tushare", "history", stock_code, True, latency_ms, reason="no_new_data")
                 return None
 
