@@ -67,7 +67,7 @@ miniqmt.bat                       # 打开交互式菜单（环境检查/配置�
 python scripts/_launcher.py menu  # 等效命令
 ```
 
-常用入口：`[7]`-`[9]` 启动账号并选择 web1.0/web2.0，`[d]`-`[i]` 管理 XtQuantManager，`[j]`-`[m]` 管理自动买入，`[n]` 配置 Tushare，`[o]` 配置大QMT 文件 IPC，`[p]` 统一切换 xttrader 直连 / IPC / RPC 交易通道。
+常用入口：`[7]`-`[9]` 启动账号并选择 web1.0/web2.0，`[d]`-`[i]` 管理 XtQuantManager，`[j]`-`[m]` 管理自动买入，`[v]` 以模拟模式启动自动买入，`[n]` 配置 Tushare，`[o]` 配置大QMT 文件 IPC，`[p]` 统一切换 xttrader 直连 / IPC / RPC 交易通道。
 
 也可配置 `launcher.ini` 后双击 `launcher.bat` 直接拉起 `main.py`：
 
@@ -174,7 +174,7 @@ python test/run_integration_regression_tests.py --all --verbose        # 详细�
 
 测试报告：`test/integration_test_report.md`
 
-当前回归配置包含 37 个测试组（含 `fast` 快速子集）。`--all` 默认排除重复的 `fast` 组，`--all-with-fast` 会连同快速子集一起运行；最近一次（2026-09-29, Unreleased）使用 Anaconda `python39` 实测为 37 组、157 个模块、3408 个用例，3408 通过、0 失败、0 错误，成功率 100%。
+当前回归配置包含 37 个测试组（含 `fast` 快速子集）。`--all` 默认排除重复的 `fast` 组，`--all-with-fast` 会连同快速子集一起运行；v3.9.4 发布前于 2026-09-30 使用 Anaconda `python39` 实测为 37 组、159 个模块、3450 个用例，3450 通过、0 失败、0 错误、0 跳过，成功率 100%。
 
 ### 单个测试文件
 

@@ -915,7 +915,7 @@ thread_monitor.get_status()
 |------|--------|------|
 | `autobuy` | high | 自动买入候选池/条件检查/防重/HTTP下单 |
 | `system_integration` | critical | 系统集成、无人值守、线程监控 |
-| `stop_profit` | high | 动态止盈止损策略（7个模块） |
+| `stop_profit` | high | 动态止盈止损策略（9个模块） |
 | `grid_signal` | high | 网格信号检测与价格追踪 |
 | `grid_session` | high | 网格会话生命周期管理 |
 | `grid_trade` | high | 网格买卖执行与资金管理 |
@@ -945,9 +945,9 @@ thread_monitor.get_status()
 | `qmt_rpc` | high | 大QMT RPC 交易后端（契约兼容、只读门禁、回调/委托映射） |
 | `simulation_trading_e2e` | critical | 模拟交易模式端到端（核心链路/Web下单/策略四分支/模式切换） |
 | `p1_fixes` | high | 重连缓存刷新/QMT自恢复探测/信号保活与时效兜底/超时泄漏可观测 |
-| `fast` | critical | 快速验证子集（当前配置 56 个模块、1394 个用例） |
+| `fast` | critical | 快速验证子集（当前配置 57 个模块、1415 个用例） |
 
-**测试统计（当前配置）**: 37组（含 `fast`）。`--all` 默认排除重复的 `fast` 组；最近一次（2026-09-29, Unreleased）使用 Anaconda `python39` 执行 `--all-with-fast` 实测为 37组、157个模块、3408个用例，3408通过、0失败、0错误，成功率100%；具体以本地运行报告为准。
+**测试统计（当前配置）**: 37组（含 `fast`）。`--all` 默认排除重复的 `fast` 组；v3.9.4 发布前于 2026-09-30 使用 Anaconda `python39` 执行 `--all-with-fast`，实测为37组、159个模块、3450个用例，3450通过、0失败、0错误、0跳过，成功率100%；具体以本地运行报告为准。
 
 ### 编写新测试的规范
 

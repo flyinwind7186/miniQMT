@@ -219,7 +219,7 @@ flowchart TD
 | `SIMULATION_BALANCE` | `1000000` | 模拟模式初始资金（元） |
 
 !!! tip "买入价格的降级链  [v3.8.8]"
-    `buy_stock()` 未传价格、或传入 `0` / 负数 / 非数值时，均按「卖三价 → 卖一价 → 最新价 `lastPrice` → 收盘价 `close`」逐级取第一个大于 0 的价格。此前只要卖三价存在就直接采用，`askPrice[2]` 为 `0`（涨停封板、盘前集合竞价等无卖盘场景）时会带着 0 价继续走到下单校验并失败。卖出侧的同类降级见[卖出委托超时与重挂参数](#卖出委托超时与重挂参数)。
+    `buy_stock()` 未传价格、或传入 `0` / 负数 / 非数值时，均按「卖三价 → 卖一价 → 最新价 `lastPrice` → 收盘价 `close`」逐级取第一个大于 0 的价格。此前只要卖三价存在就直接采用，`askPrice[2]` 为 `0`（涨停封板、盘前集合竞价等无卖盘场景）时会带着 0 价继续走到下单校验并失败。卖出侧的同类降级见[卖出委托超时与重挂参数](#sell-order-timeout-reorder)。
 
 ---
 
@@ -259,7 +259,7 @@ DYNAMIC_TAKE_PROFIT = [
 ]
 ```
 
-### 卖出委托超时与重挂参数
+### 卖出委托超时与重挂参数 {#sell-order-timeout-reorder}
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
@@ -329,6 +329,7 @@ DYNAMIC_TAKE_PROFIT = [
 | `MONITOR_CALL_TIMEOUT` | `8.0` | 持仓监控 API 调用超时（秒） |
 | `MONITOR_NON_TRADE_SLEEP` | `60` | 非交易时段休眠（秒） |
 | `GRID_POSITION_QUERY_TIMEOUT` | `5.0` | 网格交易持仓查询超时（秒） |
+| `GRID_SESSION_SWEEP_INTERVAL` | `60` | 到期/清仓网格会话独立清扫间隔（秒）；`0` 禁用定时清扫，显式 `force` 调用仍执行 |
 | `HISTORY_DATA_DOWNLOAD_TIMEOUT` | `5` | 启动时单只股票历史数据下载超时（秒），超时跳过 |
 | `GRID_LOCK_ACQUIRE_TIMEOUT` | `5.0` | 网格交易锁获取超时（秒） |
 | `QMT_POSITION_QUERY_INTERVAL` | `10.0` | QMT 持仓查询间隔（秒） |
@@ -469,9 +470,13 @@ miniQMT 内部统一使用 `000001.SZ` / `600036.SH` / `920118.BJ` 格式。用�
 | `SETTLEMENT_ASSET_IDENTITY_TOLERANCE` | `1.0` | 资产恒等式 `total_asset = cash + frozen_cash + market_value` 的容差（元） |
 | `SETTLEMENT_ASSET_JUMP_RATIO` | `0.02` | 资产跳变告警阈值（相对值） |
 | `SETTLEMENT_ASSET_JUMP_ABSOLUTE` | `5000.0` | 资产跳变告警阈值（绝对值，元） |
-| `SETTLEMENT_COMMISSION_RATE` | `0.0003` | 佣金 0.03%（买卖双边） |
+| `SETTLEMENT_COMMISSION_RATE` | `0.0001` | 佣金万分之一（买卖双边） |
 | `SETTLEMENT_STAMP_DUTY_RATE` | `0.0005` | 印花税 0.05%（仅卖出方缴纳） |
-| `SETTLEMENT_TRANSFER_FEE_RATE` | `0.00001` | 过户费 0.001%（买卖双边） |
+| `SETTLEMENT_COMMISSION_MIN_FEE` | `0.0` | 最低佣金；当前券商实测未生效，默认不设下限 |
+| `SETTLEMENT_TRANSFER_FEE_RATE` | `0.0` | 过户费；当前实测未单独收取 |
+
+!!! warning "手续费参数不是通用市场费率"
+    上述参数由 2026-09 的实盘资金流反推校准，五个交易日残差不超过 0.04 元；校准样本以深市为主。修改前必须重跑 `TestRealWorldFeeRegression`。QMT 成交回报的手续费通常为 0，系统会通过 `settlement_db.estimate_trade_cost()` 估算并标记 `commission_source=estimated`。
 
 ## 持仓同步与数据库锁参数  [v3.9.2]
 

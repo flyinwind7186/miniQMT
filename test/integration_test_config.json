@@ -315,7 +315,7 @@
     },
     "simulation_trading_e2e": {
       "name": "模拟交易模式完整系统集成测试",
-      "description": "验证模拟交易模式端到端：simulate_buy/sell_position 加权平均成本与手续费精度(买0.0003/卖0.0013)、首次部分卖出获利分摊、双层存储隔离(内存positions vs SQLite trade_records)、超卖/零量/available不足等边界拒绝；/api/actions/execute_buy 端到端下单(代码后缀格式化、M_simu标识、ENABLE_ALLOW_BUY门控、模拟模式无视交易时间)；策略层四条模拟分支(补仓/止损/半仓止盈/全仓止盈)含 Bug-A(补仓关键字参数)与 Bug-B(模拟分支冷却期)回归；simulationMode 运行时切换与 SIMULATION_BALANCE 隔离",
+      "description": "验证模拟交易模式端到端：simulate_buy/sell_position 加权平均成本与统一手续费估算、首次部分卖出获利分摊、双层存储隔离(内存positions vs SQLite trade_records)、超卖/零量/available不足等边界拒绝；/api/actions/execute_buy 端到端下单(代码后缀格式化、M_simu标识、ENABLE_ALLOW_BUY门控、模拟模式无视交易时间)；策略层四条模拟分支(补仓/止损/半仓止盈/全仓止盈)含 Bug-A(补仓关键字参数)与 Bug-B(模拟分支冷却期)回归；simulationMode 运行时切换与 SIMULATION_BALANCE 隔离",
       "modules": [
         "test.test_simulation_position_core",
         "test.test_simulation_web_execute_buy",
@@ -380,6 +380,7 @@
         "test.test_export_settlement",
         "test.test_broker_import",
         "test.test_backfill_trade_records",
+        "test.test_commission_estimate",
         "test.test_data_pipeline_e2e",
         "test.test_launcher_menu_pages",
         "test.test_positions_cache_invalidation",
@@ -413,6 +414,7 @@
         "test.test_export_settlement",
         "test.test_broker_import",
         "test.test_backfill_trade_records",
+        "test.test_commission_estimate",
         "test.test_data_pipeline_e2e",
         "test.test_snapshot_freshness"
       ]

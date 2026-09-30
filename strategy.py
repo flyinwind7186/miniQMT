@@ -611,13 +611,16 @@ class TradingStrategy:
                     logger.debug(f"{stock_code} 卖出信号已处理，跳过")
                     return False
 
+                with self.signal_lock:
+                    already_notified = signal_key in self.macd_sell_notified
+                    self.macd_sell_notified.add(signal_key)
+                if not already_notified:
+                    logger.info(f"{stock_code} 检测到技术指标卖出信号")
+
                 # MACD 技术指标卖出开关：默认关闭，满足条件仅记录信号，不执行真实卖出
                 # 降噪记录写入独立的 macd_sell_notified，不污染 processed_signals，
                 # 使得开关盘中改为 True 后当日信号无需重启进程即可立即生效
                 if not config.ENABLE_MACD_SELL:
-                    with self.signal_lock:
-                        already_notified = signal_key in self.macd_sell_notified
-                        self.macd_sell_notified.add(signal_key)
                     if not already_notified:
                         logger.info(f"{stock_code} 检测到MACD技术指标卖出信号，但 ENABLE_MACD_SELL=False，仅记录信号不执行卖出")
                     return False
@@ -627,10 +630,7 @@ class TradingStrategy:
                 if not position:
                     # 无持仓是暂时状态（盘中可能买入），不写 processed_signals 以免毒化当日信号，
                     # 仅用降噪集合防止每轮重复打印
-                    with self.signal_lock:
-                        already_warned = signal_key in self.macd_sell_notified
-                        self.macd_sell_notified.add(signal_key)
-                    if not already_warned:
+                    if not already_notified:
                         logger.warning(f"未持有 {stock_code}，无法执行卖出策略")
                     return False
 
@@ -897,8 +897,6 @@ class TradingStrategy:
                 if self._is_signal_processed(sell_key):
                     logger.debug(f"{stock_code} 卖出信号今日已处理，跳过")
                 else:
-                    logger.info(f"{stock_code} 检测到卖出信号")
-
                     # 只有在启用自动交易时才执行
                     if config.ENABLE_AUTO_TRADING:
                         if self.execute_sell_strategy(stock_code, sell_signal=sell_signal):
@@ -910,6 +908,7 @@ class TradingStrategy:
                             already_notified = sell_key in self.macd_sell_notified
                             self.macd_sell_notified.add(sell_key)
                         if not already_notified:
+                            logger.info(f"{stock_code} 检测到卖出信号")
                             logger.info(f"{stock_code} 检测到卖出信号，但自动交易已关闭")
             
             logger.debug(f"{stock_code} 没有检测到交易信号")

@@ -148,6 +148,9 @@ miniQMT 提供 RESTful API。Flask 直连模式暴露完整 web1.0 API；xtquant
 }
 ```
 
+!!! note "自动买入模块调用边界  [v3.9.4]"
+    自动买入实盘模式复用该端点，并在请求前通过 `/api/positions` 做持仓防重；持仓查询非 200、非 JSON 或返回 `status=error` 时本轮 fail-safe，不调用买入端点。自动买入自身的 `--simulate` 模式只运行筛选与记录链路，不会向该端点发送请求；它不同于主程序 `ENABLE_SIMULATION_MODE=True` 时由该端点执行模拟成交。
+
 !!! note "网关下单走 v1 接口"
     xtquant_manager 网关模式下，下单使用 `/api/v1/accounts/{account_id}/orders`。web2.0 在网关模式下通过 v1 接口下单，而不是调用 Flask 的 `/api/actions/execute_buy`。
 

@@ -162,6 +162,35 @@ class TestMacdSellSwitchNoPoisoning(unittest.TestCase):
 
         self.assertEqual(len(info_calls), 1, "重复信号不应刷屏")
 
+    def test_generic_sell_signal_log_only_once_per_day(self):
+        """策略循环重复检测到卖出信号时，通用提示每天只记录一次。"""
+        strategy = _make_strategy()
+        strategy.indicator_calculator.check_buy_signal.return_value = False
+        strategy.indicator_calculator.check_sell_signal.return_value = True
+
+        with patch("strategy.config.ENABLE_AUTO_OPERATION", True), \
+             patch("strategy.config.ENABLE_AUTO_TRADING", True), \
+             patch("strategy.config.ENABLE_DYNAMIC_STOP_PROFIT", False), \
+             patch("strategy.config.ENABLE_MACD_SELL", False), \
+             patch("strategy.logger") as mock_logger:
+            for _ in range(5):
+                strategy.check_and_execute_strategies("000001.SZ")
+
+        generic_calls = [
+            call for call in mock_logger.info.call_args_list
+            if call.args == ("000001.SZ 检测到技术指标卖出信号",)
+        ]
+        self.assertEqual(len(generic_calls), 1, "通用卖出信号日志不应重复刷屏")
+        self.assertEqual(
+            len(strategy.processed_signals), 0,
+            "日志降噪不得污染 processed_signals"
+        )
+        self.assertTrue(
+            any(key.startswith("sell_000001.SZ_")
+                for key in strategy.macd_sell_notified),
+            "通用卖出信号应写入降噪集合"
+        )
+
     def test_no_position_does_not_poison_signal(self):
         """无持仓是暂时状态，盘中买入后应能重新响应卖出信号。"""
         strategy = _make_strategy()

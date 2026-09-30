@@ -35,7 +35,8 @@ miniqmt.bat
 
 | 菜单 | 功能 |
 |------|------|
-| `[j]` | 启动自动买入服务 |
+| `[j]` | 启动自动买入服务（实盘，会调用 Web API 下单） |
+| `[v]` | 启动自动买入服务（模拟，只筛选和记录，不下单） |
 | `[k]` | 停止自动买入服务 |
 | `[l]` | 查看状态（`data/.autobuy_status.json`） |
 | `[m]` | 查看日志（`logs/miniqmt_autobuy.log`） |
@@ -43,11 +44,11 @@ miniqmt.bat
 手动单次触发：
 
 ```bash
-python -m autobuy.app --once
+python -m autobuy.app --once --simulate
 ```
 
 !!! warning "启动前检查"
-    先启动目标账号主程序或 web1.0 Flask 服务，并确认 `autobuy/miniqmt_autobuy.cfg` 中 `[web].base_url` 指向正确端口。多账号场景通常是 `:5000`、`:5001` 依次对应账号。
+    先启动目标账号主程序或 web1.0 Flask 服务。通过菜单 `[j]` / `[v]` 启动时，控制台会自动探测运行中账号的实际 Flask 端口并注入 `MINIQMT_AUTOBUY_BASE_URL`；直接运行模块时才需要确认 `[web].base_url`。`api_token` 留空时会回退到 `QMT_API_TOKEN` 环境变量或项目 `.env`。
 
 ---
 
@@ -80,11 +81,14 @@ python -m autobuy.app --once
 |------|------|
 | 大盘指数门禁 | 固定检查 `999999` / `399001` / `399005`，至少一个指数 MA5 向上才继续 |
 | 换手率 | `enable_turnover_rate` / `min_turnover_rate` / `volume_unit_multiplier` |
-| 量比 | `enable_volume_ratio` / `min_volume_ratio` |
+| 近 N 日收盘量比 | `enable_recent_volume_ratio` / `recent_volume_ratio_days` / `min_recent_volume_ratio`，默认开启且要求每天都达标 |
+| 盘中累计量比 | `enable_volume_ratio` / `min_volume_ratio`，因盘中分子与全天分母口径不对等，默认关闭 |
 | 当日涨幅 | `enable_pct_change` / `min_pct_change`，默认关闭 |
 | MA8 方向 | `enable_ma8_uptrend` |
 | 现价相对 MA8 | `enable_price_below_ma8_ratio` / `max_price_to_ma8_ratio` |
+| MA20 偏离区间 | `enable_price_to_ma20_range` / `min_price_to_ma20_deviation` / `max_price_to_ma20_deviation`，默认 `[-3%, +5%]` |
 | 涨停/停牌 | `skip_limit_up` |
+| 风险股 | `skip_st`，按证券名称前缀过滤 ST、*ST 和退市整理股 |
 
 ### 风控与调度
 
@@ -93,6 +97,7 @@ python -m autobuy.app --once
 | `dedup_by_position` | 已持仓则跳过 |
 | `dedup_window_days` | 最近 N 天买过则跳过；`0` = 当天，`-1` = 永久 |
 | `max_buys_per_run` | 每次触发最多买入数量 |
+| `simulation_mode` | 模拟运行；保留筛选、门禁、决策与状态记录，不发送真实买入请求 |
 | `mode` | `daily` / `interval` / `both` |
 | `daily_times` | 每日定点时间，逗号分隔 |
 | `interval_minutes` | 固定间隔分钟数 |
@@ -121,7 +126,7 @@ python -m autobuy.app --once
 
 1. 确认外部候选池 `chan.db` 路径、表名、列名正确。
 2. 启动目标账号主程序，确认 `GET /api/positions` 可访问。
-3. 运行 `python -m autobuy.app --once` 做单次验证。
+3. 运行 `python -m autobuy.app --once --simulate` 做单次安全验证。
 4. 查看 `logs/miniqmt_autobuy.log`，确认大盘门禁、候选数量、通过数量和下单结果。
 5. 查看 `data/autobuy.db`，复核 `buy_history` 与 `decision_log`。
 

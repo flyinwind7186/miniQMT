@@ -4,13 +4,13 @@
 
 项目测试代码位于 [test/](https://github.com/weihong-su/miniQMT/tree/main/test) 目录，使用标准 `unittest`。当前回归配置见 `test/integration_test_config.json`，包含 37 个测试组（含 `fast` 快速子集）。
 
-最近一次（2026-09-29, Unreleased）使用 Anaconda `python39` 执行 `--all-with-fast` 实测：**37 组、157 模块、3408 用例、3408 通过、0 失败、0 错误、0 跳过，成功率 100%**，耗时 1041.57 秒。
+v3.9.4 发布前于 2026-09-30 使用 Anaconda `python39` 执行 `--all-with-fast` 实测：**37 组、159 模块、3450 用例、3450 通过、0 失败、0 错误、0 跳过，成功率 100%**，耗时 1085.56 秒。
 
 ## 测试统计速查
 
 | 版本 | 日期 | 回归规模（含 fast） | 通过用例 | 通过率 |
 |------|------|----------|--------|--------|
-| Unreleased | 2026-09-29 | 37 组, 157 模块, 3408 用例 | 3408 | 100% |
+| v3.9.4 | 2026-09-30 | 37 组, 159 模块, 3450 用例 | 3450 | 100% |
 | v3.9.3 | 2026-09-19 | 37 组, 154 模块, 3248 用例 | 3248 | 100% |
 | v3.9.2 | 2026-09-14 | 36 组, 148 模块, 3166 用例 | 3166 | 100% |
 | v3.9.1 | 2026-09-12 | 36 组, 146 模块, 3126 用例 | 3126 | 100% |
@@ -112,7 +112,7 @@ python test/run_all_grid_tests.py
 |------|--------|------|
 | `autobuy` | high | 自动买入候选池筛选、条件检查、防重、HTTP 下单 |
 | `system_integration` | critical | 系统集成、无人值守、线程监控 |
-| `stop_profit` | high | 动态止盈止损策略（7 个模块） |
+| `stop_profit` | high | 动态止盈止损策略（9 个模块） |
 | `grid_signal` | high | 网格信号检测与价格追踪 |
 | `grid_session` | high | 网格会话生命周期管理 |
 | `grid_trade` | high | 网格买卖执行与资金管理 |
@@ -142,7 +142,7 @@ python test/run_all_grid_tests.py
 | `qmt_rpc` | high | 大QMT RPC 交易后端契约、只读门禁、回调和委托映射 |
 | `simulation_trading_e2e` | critical | 模拟交易模式端到端（核心链路 / Web 下单 / 策略四分支 / 模式切换） |
 | `p1_fixes` | high | 重连缓存刷新 / QMT 自恢复探测 / 信号保活与时效兜底 / 超时泄漏可观测 |
-| `fast` | critical | 5 分钟快速验证子集（当前 56 个模块、1394 个用例） |
+| `fast` | critical | 5 分钟快速验证子集（当前 57 个模块、1415 个用例） |
 
 ---
 

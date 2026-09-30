@@ -6,9 +6,29 @@
 
 ## [Unreleased]
 
+## [3.9.4] - 2026-09-30
+
+> 本版本聚焦自动买入安全、网格会话生命周期、交割单准确性和运行日志可观测性；
+> 同时把新增的手续费实证回归正式纳入完整集成测试。
+
+### Added
+
+- **自动买入筛选与模拟运行**：新增 MA20 偏离区间、近 N 日已收盘量比、ST/*ST/退市整理股过滤；支持 `simulation_mode` / `--simulate` 全链路试跑，模拟记录不参与实盘防重。
+- **自动买入分析工具**：新增只读试跑、历史回测和止盈止损联合回测脚本。
+- **网格会话独立清扫**：新增 `sweep_stale_sessions()` 与 `GRID_SESSION_SWEEP_INTERVAL`，不依赖当前持仓列表即可清理到期会话；自动会话连续两轮确认清仓后退出，暂停会话保留现场供人工复核。
+
 ### Fixed
 
+- **自动买入防重失效**：统一历史买入代码为六位数字，修复 `600000.SH` 与 `600000` 永不命中的问题；持仓接口非 200、非 JSON 或业务错误时改为 fail-safe，本轮不下单。
+- **净值半残读数落库**：拒绝“现金与冻结均为 0、但总资产明显不等于持仓市值”的不完整快照；普通估值时点差导致的资产恒等式偏差仍只告警，不阻断快照。
 - **Tushare 休市空区间被误判为接口连续失败**：历史库已更新到前一交易日、待补区间全部为周末或法定休市日时，Tushare `daily` 会成功返回空 `DataFrame`。旧实现把 `None` 与空表合并处理，连续三次后进入 300 秒冷却，后台线程随后每次冷却结束继续累计并输出告警。现拆分语义：`None` 仍计为失败；空表记录健康事件 `reason=no_data` 并清零失败状态；日期过滤后无新增记录同样以 `no_new_data` 成功处理。
+- **MACD 卖出信号日志刷屏**：通用技术指标卖出提示纳入 `macd_sell_notified`，同一股票每天只记录一次；不写入 `processed_signals`，盘中打开 `ENABLE_MACD_SELL` 后当日信号仍可立即执行。
+
+### Changed
+
+- **手续费估算统一**：`settlement_db.estimate_trade_cost()` 成为实盘落库、模拟成交和历史回填的唯一入口。按实盘资金流校准为佣金万分之一（双边）+ 印花税万分之五（仅卖出），最低佣金与过户费默认 0；QMT 回报手续费为 0/None 时自动估算并标记 `commission_source=estimated`。
+- **自动买入启动器联动**：服务页新增 `[v]` 模拟启动；启动时自动探测运行中账号的 Flask 端口，Token 按配置文件、环境变量、`.env` 顺序回退。
+- **委托日志价格语义**：网格待成交登记使用“触发价”，执行器使用“报价基准”，实际委托价以滑点处理后的底层交易日志为准。
 
 ### Security
 
@@ -16,11 +36,12 @@
 
 ### Documentation
 
-- 更新项目总览、快速开始、配置参考、Web 前端/Web API 和测试文档，补充 `no_data` 健康语义及最新回归统计。
+- 更新项目总览、快速开始、架构、配置参考、自动买入、Web 前端/Web API 和测试文档，补充网格会话清扫、手续费口径、模拟自动买入、`no_data` 健康语义及最新回归统计。
 
 ### Tests
 
-- 新增 Tushare 节假日空区间、异常 `None`、筛选后无新增数据三类回归断言；2026-09-29 使用 Anaconda `python39` 执行 `--all-with-fast`：**37 组、157 模块、3408 用例，3408 通过、0 失败、0 错误、0 跳过，成功率 100%**，耗时 1041.57 秒。
+- 新增自动买入、网格会话清扫、净值半残读数、手续费实证、Tushare 休市空区间和 MACD 日志降噪回归；手续费模块已纳入 `settlement_export` 与 `fast`，避免新增测试游离在发布门禁之外。
+- 2026-09-30 使用 Anaconda `python39` 执行 `--all-with-fast`：**37 组、159 模块、3450 用例，3450 通过、0 失败、0 错误、0 跳过，成功率 100%**，耗时 1085.56 秒。
 
 ## [3.9.3] - 2026-09-19
 
@@ -49,7 +70,7 @@
   忽略（用 DB 值取 `max`），不受影响；`_sync_real_positions_to_memory()` 的同名参数
   **直读内存表、不经缓存**，无此问题，未改动。
 
-  新增 [test/test_stop_loss_price_regression.py](test/test_stop_loss_price_regression.py)
+  新增 [test/test_stop_loss_price_regression.py](https://github.com/weihong-su/miniQMT/blob/main/test/test_stop_loss_price_regression.py)
   （4 用例，已接入 `stop_profit` 与 `fast` 组）。修复前 3 个用例失败，失败值恰为
   `72.34 -> 72.13`。
 
@@ -80,7 +101,7 @@
 - **交易日志 ID 术语统一**（2026-09-17）：同一笔交易里同一个值曾被标成 4 种不同的 key
   （`订单号=` / `委托号:` / `order_id=` / `trade_id=`，实测值均为 `403701761`），
   排查实盘问题时无法确定哪个是哪个。本次按 QMT 官方
-  [xtquant/xttype.py](xtquant/xttype.py) 的字段定义收敛为五个互斥术语：
+  [xtquant/xttype.py](https://github.com/weihong-su/miniQMT/blob/main/xtquant/xttype.py) 的字段定义收敛为五个互斥术语：
 
   | 变量 | 统一为 | 统一前的叫法 |
   |------|-------|------------|
@@ -111,9 +132,9 @@
   - 每笔网格交易都会打印的 `signal={整个dict}`（单行 300+ 字符，含
     `callback_ratio: 0.003461704889658083` 这类未格式化浮点）瘦身为 5 个关键字段
 
-- **新增共用常量**（[config.py](config.py)）：`ORDER_STATUS_LABELS`（委托状态码→中文）与
+- **新增共用常量**（[config.py](https://github.com/weihong-su/miniQMT/blob/main/config.py)）：`ORDER_STATUS_LABELS`（委托状态码→中文）与
   `TRADE_SIDE_LABELS`（BUY/SELL→中文）。前者此前在
-  [trading_executor.py](trading_executor.py) 中重复定义了两份完全相同的字典。
+  [trading_executor.py](https://github.com/weihong-su/miniQMT/blob/main/trading_executor.py) 中重复定义了两份完全相同的字典。
 
 - **局部变量重命名**：`grid_trading_manager.py` 的 `_execute_grid_buy` /
   `_execute_grid_sell` / `execute_grid_trade` / `_reorder_grid_order_after_cancel` /
@@ -136,7 +157,7 @@
 
 > 以上 **Changed** 部分只改日志文案与语义错误的局部变量名，**未改动任何交易逻辑**；
 > 本版本涉及交易逻辑的改动全部在上方 **Fixed** 中。
-> 日志术语规范已写入 [CLAUDE.md](CLAUDE.md) 开发规范一节。
+> 日志术语规范已写入 [CLAUDE.md](https://github.com/weihong-su/miniQMT/blob/main/CLAUDE.md) 开发规范一节。
 
 ### 测试
 
@@ -313,7 +334,7 @@
   重建"，无备份、无人工确认；`grid_database.py` 另有一处会丢全部历史网格成交。
   加了 `assert_test_db()` 守卫，生产库改为告警引导 `.recover`。
 - **终端刷屏可反噬进程致死，加三层防御**（2026-09-10，针对 Windows Terminal 自身缺陷的鲁棒性设计）：2026-09-09 的进程静默死亡已确认**根因不在本项目**——`WindowsTerminal.exe` 占用 **27.8GB** 打爆 24.8GB 系统提交上限（Windows 事件 ID 2004 连报三次），miniQMT 连 1MB 线程栈都提交不到，抛 `can't start new thread`。[microsoft/terminal#8283](https://github.com/microsoft/terminal/issues/8283) 记录了同型模式（每 10ms 回移光标打印 → 内存以 0.1MB/10s 增长，根因是 VT parser 的 ETW tracing vector 无限膨胀），[#768](https://github.com/microsoft/terminal/issues/768) 指出持续刷屏的应用触发最激进增长。**我们无法修复终端，只能控制喂给它的量**。
-  - **量化先于设计**：统计实际日志密度发现稳态仅 **0.01~0.08 行/秒**、启动瞬间峰值约 140 行/秒——**日志从来不是主因**。真正的大头是 [main.py](main.py) 的 spinner：每 0.25 秒写一次 stdout，138 小时累计约 **199 万次**，是同期日志行数的 **58 倍**。泄漏与写入**次数**相关而非字节数，这决定了优化必须打在 spinner 上。
+  - **量化先于设计**：统计实际日志密度发现稳态仅 **0.01~0.08 行/秒**、启动瞬间峰值约 140 行/秒——**日志从来不是主因**。真正的大头是 [main.py](https://github.com/weihong-su/miniQMT/blob/main/main.py) 的 spinner：每 0.25 秒写一次 stdout，138 小时累计约 **199 万次**，是同期日志行数的 **58 倍**。泄漏与写入**次数**相关而非字节数，这决定了优化必须打在 spinner 上。
   - **L1 源头减量**：`SPINNER_INTERVAL = 1.0`（原硬编码 0.25 秒），写入次数直降 75%（199 万 → 50 万）。
   - **L2 按 key 节流**：`log_throttled()` 压制**已知**的持续性状态刷屏（见上一条）。
   - **L3 控制台令牌桶限速**：`SafeStreamHandler` 内置令牌桶，**无差别兜住任何未预见的突发刷屏源**——L2 只能覆盖预判到的点位，L3 不需要预判。参数按实测流量选定：`CONSOLE_LOG_BURST = 300` 容得下 140 行/秒的启动峰值不误伤，`CONSOLE_LOG_RATE = 20` 仅在异常刷屏时截断；设 `CONSOLE_LOG_RATE = 0` 可关闭。
@@ -325,7 +346,7 @@
   - **这不只是噪音**：控制台输出持续灌进终端回滚缓冲，当日 15:24/15:54/16:24 Windows 连报三次 Event ID 2004「虚拟内存不足」，元凶 `WindowsTerminal.exe` 占用 **27.8GB** 打爆 24.8GB 系统提交上限；16:24:39 事件后 27 秒，miniQMT 自己成了受害者，抛 `can't start new thread` 并静默死亡 3 小时。刷屏是这条因果链的燃料。
   - 新增 `logger.log_throttled()` / `logger.reset_log_throttle()`：按 key（含股票代码与事件名）节流，首次立即输出，窗口内累计并在下次输出时附「期间重复 N 次未打印」。窗口由 `config.LOG_THROTTLE_INTERVAL`（默认 300 秒）控制。
   - **只改日志层，不动重试节奏**：信号仍每轮重新检测与尝试，`available` 一恢复即刻执行——交易行为零变化。曾考虑改为退避重试，但那会推迟状态恢复后的成交时机，收益不抵风险。
-  - **节流必须能被状态翻转打断**，否则会掩盖真实变化。三处 reset：价格回到止损位上方时清 `stop_loss_detect`（[position_manager.py](position_manager.py) 止损分支前），`validate_trading_signal` 通过时清 `pending_order_block`/`available_zero_block`，`execute_trading_signal_direct` 验证通过时清 `signal_blocked`。缺了这些，「阻断→恢复→再阻断」的第二次阻断会被上一轮窗口吞掉。
+  - **节流必须能被状态翻转打断**，否则会掩盖真实变化。三处 reset：价格回到止损位上方时清 `stop_loss_detect`（[position_manager.py](https://github.com/weihong-su/miniQMT/blob/main/position_manager.py) 止损分支前），`validate_trading_signal` 通过时清 `pending_order_block`/`available_zero_block`，`execute_trading_signal_direct` 验证通过时清 `signal_blocked`。缺了这些，「阻断→恢复→再阻断」的第二次阻断会被上一轮窗口吞掉。
   - 顺带把 6 行 WARN+ERROR 合并为 1 行且级别降为 WARNING——`available=0` 是 T+1 冻结的**预期状态**，不是 ERROR；原文案「拒绝新信号执行 / 建议人工确认」四行连打，实盘一天能刷出上千条假错误，淹没真正的 ERROR。
   - 同口径覆盖 `_has_tracked_pending_order` / `_has_pending_orders` 两处「待委托拦截」——它们先于 `available=0` 分支执行，委托在途时刷屏的其实是这两处。
   - 按同一场景估算：约 3800 行 → 约 20 行（77 分钟 / 5 分钟窗口 × 3 类事件 + 首次），且信息量不减（首次完整、周期汇总带抑制计数）。
@@ -419,9 +440,9 @@
   - 交割单四项操作落在 `[3] 数据与配置` 页，其中 `[r][s][t]` 会改写 `trade_records`，
     菜单内置**停机守卫**（有账号运行则拒绝执行），且强制先跑 dry-run 预演、
     需输入 `yes` 才正式执行。
-- **系统心跳新增线程数与内存指标**（2026-09-09 日志审查后补，纯可观测性）：当日 16:25 主进程在连续运行 **138 小时**后抛 `RuntimeError: can't start new thread`（`data_manager.get_latest_xtdata` 提交线程池任务时），随后 3 小时**无任何日志、心跳全停**，直到 19:20 手工重启——属进程级静默死亡，`thread_monitor` 对此无能为力（它只能重启线程，不能重启进程）。事后排查发现**没有任何指标可用于归因**：`timeout_utils` 的泄漏计数本运行周期仅告警 5 次，[data_manager.py](data_manager.py) 的 9 处 `ThreadPoolExecutor` 均已 `shutdown(wait=False)`，无法区分线程泄漏与内存耗尽。现在心跳每 30 分钟输出一行 `线程数:N | 内存:RSS xxxMB / VMS xxxMB`，两条曲线足以分辨故障类型（线程数单调上升=线程泄漏；线程数平稳而 RSS/VMS 增长=内存泄漏）。
+- **系统心跳新增线程数与内存指标**（2026-09-09 日志审查后补，纯可观测性）：当日 16:25 主进程在连续运行 **138 小时**后抛 `RuntimeError: can't start new thread`（`data_manager.get_latest_xtdata` 提交线程池任务时），随后 3 小时**无任何日志、心跳全停**，直到 19:20 手工重启——属进程级静默死亡，`thread_monitor` 对此无能为力（它只能重启线程，不能重启进程）。事后排查发现**没有任何指标可用于归因**：`timeout_utils` 的泄漏计数本运行周期仅告警 5 次，[data_manager.py](https://github.com/weihong-su/miniQMT/blob/main/data_manager.py) 的 9 处 `ThreadPoolExecutor` 均已 `shutdown(wait=False)`，无法区分线程泄漏与内存耗尽。现在心跳每 30 分钟输出一行 `线程数:N | 内存:RSS xxxMB / VMS xxxMB`，两条曲线足以分辨故障类型（线程数单调上升=线程泄漏；线程数平稳而 RSS/VMS 增长=内存泄漏）。
   - 新增独立函数 `main._format_resource_line()`，**未改动 `_format_heartbeat_status_lines()` 的二元组返回签名**——既有用例按 `status_line, grid_line = ...` 解包，加行会直接解包失败。
-  - `utils.memory_usage()` 补 Win32 回退：**psutil 既未安装也不在 [utils/requirements.txt](utils/requirements.txt) 中**，原实现在缺失时只打一句 warning 返回 `None`，不补回退则该指标永远是「获取失败」。回退走 `kernel32.K32GetProcessMemoryInfo`，零新依赖，口径与 psutil 对齐（`WorkingSetSize`→rss、`PagefileUsage`→vms，实测两者差异 <0.5%）。**必须显式声明 `GetCurrentProcess.restype = wintypes.HANDLE`**——默认 `c_int` 会在 64 位下截断伪句柄 `-1`，第一版因此实测返回 `None`。psutil 若日后装上则优先使用。
+  - `utils.memory_usage()` 补 Win32 回退：**psutil 既未安装也不在 [utils/requirements.txt](https://github.com/weihong-su/miniQMT/blob/main/utils/requirements.txt) 中**，原实现在缺失时只打一句 warning 返回 `None`，不补回退则该指标永远是「获取失败」。回退走 `kernel32.K32GetProcessMemoryInfo`，零新依赖，口径与 psutil 对齐（`WorkingSetSize`→rss、`PagefileUsage`→vms，实测两者差异 <0.5%）。**必须显式声明 `GetCurrentProcess.restype = wintypes.HANDLE`**——默认 `c_int` 会在 64 位下截断伪句柄 `-1`，第一版因此实测返回 `None`。psutil 若日后装上则优先使用。
   - ⚠️ **主判据是线程数而非 VMS**：Windows 的 `PagefileUsage` 是私有提交量，线程栈是保留而非提交，每条只贡献约 8KB，对 `can't start new thread` 的指示远不如线程数直接。
   - **次日补充 OS 口径（关键修正）**：指标上线首日即暴露自身缺陷——心跳报 `线程数:18`，而同一进程 OS 实际有 **104** 条线程，差的 86 条是 xtquant / QMT SDK 创建的原生线程，`threading.active_count()` 完全看不见。**最可能泄漏的部分恰恰在 Python 视野之外**，原指标等于监控了错误的东西。新增 `utils.process_resource_stats()`（`CreateToolhelp32Snapshot` 遍历线程快照按 `th32OwnerProcessID` 过滤 + `GetProcessHandleCount`），心跳行改为 `线程数:18(OS 104) | 句柄:1037 | 内存:...`。句柄数一并纳入，因为耗尽时同样表现为打开文件失败——2026-09-09 故障现场那条 `[Errno 22] 打开 .mootdx/config.json 失败` 正是此类症状，缺这个数就无法与线程耗尽区分。单次采集实测 48ms（扫描约 3600 条系统线程），30 分钟一次可忽略。
   - **首日结论：miniQMT 自身无泄漏，昨日崩溃是被系统级内存耗尽波及**。7 小时心跳显示 Python 线程 17→18（波动非趋势）、VMS 179→182MB（+0.4MB/h）；RSS 180→195MB 的上升是工作集假象——收盘后实测同一进程 RSS 从 195MB 跌至 31MB 而私有提交仍为 182MB，属 Windows 工作集 trim。对运行中进程在 16:47/16:52/16:55 三次采样，`OS线程=104、句柄=1037、私有=182MB` **三次完全相同**。真凶由 Windows 事件日志 Event ID 2004（Resource-Exhaustion-Detector）锁定：09-09 15:24/15:54/16:24 三次「虚拟内存不足」，元凶 `WindowsTerminal.exe(23852)` 占用 **29,827,301,376 字节（27.8GB）**，打爆 24.8GB 系统提交上限，**python 进程从未出现在元凶名单中**（仅 182MB）；16:24:39 该事件后 **27 秒**，miniQMT 即抛 `can't start new thread`。
@@ -1078,7 +1099,8 @@
 - 模拟交易模式（无需 QMT 即可验证策略）
 - 回归测试框架基础设施
 
-[Unreleased]: https://github.com/weihong-su/miniQMT/compare/v3.9.3...HEAD
+[Unreleased]: https://github.com/weihong-su/miniQMT/compare/v3.9.4...HEAD
+[3.9.4]: https://github.com/weihong-su/miniQMT/compare/v3.9.3...v3.9.4
 [3.9.3]: https://github.com/weihong-su/miniQMT/compare/v3.9.2...v3.9.3
 [3.9.2]: https://github.com/weihong-su/miniQMT/compare/v3.9.1...v3.9.2
 [3.9.1]: https://github.com/weihong-su/miniQMT/compare/v3.9.0...v3.9.1
