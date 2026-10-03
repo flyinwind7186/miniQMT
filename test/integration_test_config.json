@@ -199,7 +199,8 @@
         "test.test_unattended_operation",
         "test.test_thread_monitoring",
         "test.test_premarket_xttrader_reinit",
-        "test.test_trade_time_windows"
+        "test.test_trade_time_windows",
+        "test.test_trade_calendar"
       ],
       "priority": "critical"
     },

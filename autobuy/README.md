@@ -40,14 +40,16 @@ python -m autobuy.app  (独立进程, 由 miniqmt.bat [j] 启动)
 A 股法定节假日(春节/国庆等连休 5~9 天)不能按"周一至周五"判断,否则整个长假会被当成交易日,
 每 30 分钟空跑一轮完整筛选(2026-10-01 实测如此)。
 
+- **唯一来源**:根目录 `trade_calendar.py`,全仓库(主程序 + autobuy)共用同一份日历与同一套
+  判定函数,autobuy 不再自带实现
 - **数据源**:Tushare `trade_cal`(SSE),复用项目已有的 `TUSHARE_TOKEN`,不引入新依赖
-- **启动刷新**:进程启动时**无条件**拉取一次并写入 `data/autobuy_trade_calendar.db`
+- **启动刷新**:进程启动时**无条件**拉取一次并写入 `data/trade_calendar.db`
   (回看 30 天 + 前推 370 天)。服务可能连续运行数周,长假前必须拿到新日历
 - **运行期**:只读本地缓存,不联网
 - **降级**:取数失败或日期在缓存覆盖范围外时退化为"周一至周五",日志打 WARNING。
   取数失败**不写缓存**,已有的权威日历不会被近似值覆盖;降级时宁可多跑一轮,
   也不因为日历缺失而漏买
-- 缓存路径可用环境变量 `MINIQMT_AUTOBUY_CALENDAR_DB` 覆盖
+- 缓存路径可用环境变量 `MINIQMT_TRADE_CALENDAR_DB` 覆盖
 
 ## 大盘指数门禁
 
@@ -60,7 +62,7 @@ A 股法定节假日(春节/国庆等连休 5~9 天)不能按"周一至周五"�
 | `miniqmt_autobuy.cfg` | INI 配置 |
 | `config.py` | 配置解析 + 校验 + autobuy 独立 logger |
 | `pool.py` | 候选池筛选(多表/最近N个交易日/代码格式转换) |
-| `trade_calendar.py` | 交易日历(Tushare 刷新 + 本地缓存 + 周一至周五降级) |
+| `../trade_calendar.py` | 交易日历(项目根目录,主程序与 autobuy 共用的唯一口径) |
 | `filter.py` | 买入条件检查 |
 | `client.py` | HTTP 下单 + 查持仓 |
 | `store.py` | 自有库 `data/autobuy.db`(防重 + 复盘) |

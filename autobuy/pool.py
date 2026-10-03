@@ -15,7 +15,7 @@ import os
 import re
 import sqlite3
 
-from . import trade_calendar
+import trade_calendar
 from .config import AutoBuyConfig, PROJECT_ROOT, get_autobuy_logger
 
 logger = get_autobuy_logger("autobuy.pool")

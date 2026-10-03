@@ -22,6 +22,7 @@ for _i, _arg in enumerate(_argv):
 # ─────────────────────────────────────────────────────────
 
 import config
+import trade_calendar
 
 # ── 设置控制台窗口标题 + 写入 PID 文件（供 menu.bat / scripts/_launcher.py 跟踪进程）──
 def _setup_window_and_pid():
@@ -606,6 +607,10 @@ def main():
         # 设置信号处理
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
+
+        # 交易日历: 进程可能连续运行数周，长假前必须拿到新日历，否则 is_trade_time()
+        # 等判定会按"周一至周五"把整个长假当成交易日。刷新失败只告警，不阻断启动。
+        trade_calendar.refresh_at_startup()
 
         # 初始化系统
         data_manager, indicator_calculator, position_manager, trading_executor, trading_strategy = init_system()

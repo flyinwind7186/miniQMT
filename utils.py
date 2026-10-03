@@ -10,6 +10,7 @@ import pandas as pd
 import numpy as np
 
 import config
+import trade_calendar
 from logger import get_logger
 
 # 获取logger
@@ -407,27 +408,21 @@ def convert_amount_to_chinese(amount):
 def get_trading_days(start_date, end_date=None):
     """
     获取交易日列表
-    
+
+    交易日口径统一走 trade_calendar（权威日历 + 周一至周五降级），不再自行按
+    周内日过滤 —— 旧实现直接忽略了节假日。
+
     参数:
     start_date (str): 开始日期，格式 'YYYY-MM-DD'
     end_date (str): 结束日期，格式 'YYYY-MM-DD'，如果为None则使用当前日期
-    
+
     返回:
     list: 交易日列表
     """
-    # 由于迅投API没有提供交易日历接口，这里简单处理，忽略了节假日
     if end_date is None:
         end_date = datetime.now().strftime('%Y-%m-%d')
-    
-    start = pd.to_datetime(start_date)
-    end = pd.to_datetime(end_date)
-    
-    all_days = pd.date_range(start=start, end=end)
-    
-    # 周末过滤
-    trading_days = [day.strftime('%Y-%m-%d') for day in all_days if day.weekday() < 5]
-    
-    return trading_days
+
+    return trade_calendar.trading_days_between(start_date, end_date)
 
 def _memory_usage_windows():
     """未安装 psutil 时，通过 Win32 API 获取当前进程内存占用。

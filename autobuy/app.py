@@ -20,7 +20,7 @@ import threading
 from datetime import date, datetime
 
 import config
-from . import trade_calendar
+import trade_calendar
 from .config import DEFAULT_CFG_PATH, PROJECT_ROOT, get_autobuy_logger, load_config
 from .pool import normalize_code, read_candidates
 from .store import AutoBuyStore
@@ -201,7 +201,7 @@ class AutoBuyApp:
             return None
         if not config.is_market_hours():
             return "非交易时段"
-        is_open_today, confident = trade_calendar.is_open(date.today())
+        is_open_today, confident = trade_calendar.is_trading_day_confident(date.today())
         if not confident:
             self._warn_calendar_fallback()
             return None

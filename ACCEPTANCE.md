@@ -15,7 +15,7 @@
 | 0.1 | 迁移基础设施（`db_migrate.py`：幂等补列、备份、测试库守卫、账号发现） | ✅ 完成并测试 |
 | 0.2 | `position_snapshot` 表 + 09:25/15:05 快照写入 | ✅ 完成并测试 |
 | 0.3 | `account_equity_daily` 表 + 恒等式校验 + 跳变告警 | ✅ 完成并测试 |
-| 0.4 | 交易日历（`stock_daily_data` 反推，避长假误报） | ✅ 完成并测试 |
+| 0.4 | 交易日历（`trade_calendar.py` 全仓唯一口径：Tushare `trade_cal` 权威日历 + 本地缓存 + 周一至周五降级） | ✅ 完成并测试 |
 | 0.x | 线程接入 `main.py` / `premarket_sync.py` / 心跳采样 | ✅ 完成，**待实盘验证** |
 | 1.1 | `trade_records` 扩展（17 列） | ✅ 代码完成，**未在生产库执行** |
 | 1.2 | 占位流水归档 + 重复行标记 + 唯一索引 | ✅ 代码完成，**未在生产库执行** |
@@ -152,7 +152,8 @@ python db_migrate.py --accounts all --dry-run                                # �
 
 | 模块 | 覆盖 |
 |---|---|
-| `test/test_settlement_db.py` | 快照 / 净值 / run_events / 交易日历 / 成交统一写入口 / 模拟隔离 / 迁移守卫 |
+| `test/test_settlement_db.py` | 快照 / 净值 / run_events / 成交统一写入口 / 模拟隔离 / 迁移守卫 |
+| `test/test_trade_calendar.py` | 交易日历本体（刷新/降级/前后交易日/区间枚举）+ 各调用点（config 下单窗口、盘前同步、日线补齐、收盘快照、utils）的节假日判定 |
 | `test/test_grid_deal_time_source.py` | 网格 time_source 透传（exchange / local_fallback / reconcile_backfill） |
 | `test/test_export_settlement.py` | 合并规则 / 14 列结构 / 缺快照报错 / 幂等 sha256 |
 | `test/test_broker_import.py` | GBK 解析 / 三级匹配 / 回填决策 / 未匹配不硬凑 |

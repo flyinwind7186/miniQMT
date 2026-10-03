@@ -11,12 +11,14 @@ import shutil
 import tempfile
 import unittest
 from datetime import datetime, timedelta, time as dtime
+from unittest.mock import patch
 
 import pandas as pd
 
 import config
 import db_migrate
 import settlement_db as sdb
+import trade_calendar
 
 
 class FakePositionManager:
@@ -106,36 +108,6 @@ class TestRunEvents(SettlementDBTestBase):
         sdb.log_event('startup', detail='plain text', db_path=self.db)
         self.assertEqual(self.query("SELECT detail FROM run_events")[0]['detail'],
                          'plain text')
-
-
-class TestTradingCalendar(SettlementDBTestBase):
-    def test_day_with_kline_is_trading_day(self):
-        self.add_kline_days(['2026-09-10', '2026-09-11'])
-        trading, confident = sdb.is_trading_day('2026-09-10', self.db)
-        self.assertTrue(trading)
-        self.assertTrue(confident)
-
-    def test_holiday_inside_coverage_is_not_trading_day(self):
-        """覆盖范围内但无 K 线 —— 确信是休市日（这正是节假日的样子）。"""
-        self.add_kline_days(['2026-09-30', '2026-10-09'])
-        trading, confident = sdb.is_trading_day('2026-10-01', self.db)
-        self.assertFalse(trading)
-        self.assertTrue(confident)
-
-    def test_outside_coverage_falls_back_to_weekday(self):
-        self.add_kline_days(['2026-09-10'])
-        # 2027-01-04 是周一，超出覆盖范围 → 降级判断且 confident=False
-        trading, confident = sdb.is_trading_day('2027-01-04', self.db)
-        self.assertTrue(trading)
-        self.assertFalse(confident)
-        # 2027-01-09 是周六
-        trading, confident = sdb.is_trading_day('2027-01-09', self.db)
-        self.assertFalse(trading)
-        self.assertFalse(confident)
-
-    def test_empty_kline_table_falls_back(self):
-        trading, confident = sdb.is_trading_day('2026-09-10', self.db)
-        self.assertFalse(confident)
 
 
 class TestPositionSnapshot(SettlementDBTestBase):
@@ -432,8 +404,9 @@ class TestPartialAssetDetection(unittest.TestCase):
 class TestCloseSnapshotGate(unittest.TestCase):
     """收盘快照的触发门控。
 
-    回归：周六实测写出了一份 close 快照 —— 降级判断（K 线未入库时按
-    工作日放行）没有排除周末。
+    回归：周六实测写出了一份 close 快照 —— 降级判断没有排除周末。
+    交易日判定现已统一走 trade_calendar，trading/confident 由其
+    is_trading_day_confident() 提供。
     """
 
     TARGET = dtime(15, 5, 0)
@@ -457,9 +430,15 @@ class TestCloseSnapshotGate(unittest.TestCase):
             self._at('2026-09-13 16:00:00'), self.TARGET, None, False, False))
 
     def test_weekday_unconfident_still_runs(self):
-        """交易日当天 K 线未入库时仍要跑 —— 宁可多写一次也不漏。"""
+        """日历不可用时工作日仍要跑 —— 宁可多写一次也不漏。
+
+        日历不可用时 is_trading_day_confident() 返回 (周一至周五, False)，工作日即
+        trading=True。旧实现里另有一句 `(not confident) and weekday<5` 兜底，但它
+        恒为 False（confident=False 时 trading 恒等于 weekday<5），属死代码，已随
+        统一日历一并移除。
+        """
         self.assertTrue(sdb.should_run_close_snapshot(
-            self._at('2026-09-14 15:06:00'), self.TARGET, None, False, False))
+            self._at('2026-09-14 15:06:00'), self.TARGET, None, True, False))
 
     def test_confirmed_holiday_does_not_run(self):
         """确信是休市日（长假）→ 不跑，避免长假期间每天写空快照。"""
@@ -482,37 +461,57 @@ class TestCloseSnapshotGate(unittest.TestCase):
 
 
 class TestSnapshotHealth(SettlementDBTestBase):
-    def test_no_missing_when_snapshots_complete(self):
-        pm = FakePositionManager(make_positions([
-            ['000620', '盈新发展', 1000, 1000, 5.0, 5.0, 5.5, 5500, 0.10]]))
+    """持仓快照健康检查。
+
+    交易日判定已统一走 trade_calendar，用例把日历钉死到指定日期集合，既保证
+    确定性，也能真正验证"只对交易日检查缺失"（此前用本机 K 线表推导，节假日
+    一多就会静默跳过全部检查，使断言空转）。
+    """
+
+    @staticmethod
+    def _recent_days(n, offset=1):
         today = datetime.now().date()
-        days = []
-        d = today - timedelta(days=1)
-        while len(days) < 3:
-            if d.weekday() < 5:
-                days.append(d.strftime('%Y-%m-%d'))
-            d -= timedelta(days=1)
-        self.add_kline_days(days)
+        return [(today - timedelta(days=i)).strftime('%Y-%m-%d')
+                for i in range(offset, offset + n)]
+
+    def _pin_trading_days(self, days):
+        wanted = set(days)
+        patcher = patch.object(
+            trade_calendar, 'is_trading_day_confident',
+            side_effect=lambda value, db_path=None: (str(value) in wanted, True))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _write_snapshots(self, pm, days):
         for day in days:
             for stype in (sdb.SNAPSHOT_OPEN, sdb.SNAPSHOT_CLOSE):
                 sdb.write_position_snapshot(pm, stype, snapshot_date=day, db_path=self.db)
+
+    def test_no_missing_when_snapshots_complete(self):
+        pm = FakePositionManager(make_positions([
+            ['000620', '盈新发展', 1000, 1000, 5.0, 5.0, 5.5, 5500, 0.10]]))
+        days = self._recent_days(3)
+        self._pin_trading_days(days)
+        self._write_snapshots(pm, days)
         self.assertEqual(sdb.check_snapshot_health(lookback_days=7, db_path=self.db), [])
 
     def test_holidays_do_not_count_as_missing(self):
-        """长假不该产生连续缺失误报 —— 这是没有节假日日历时的最大误报源。"""
-        self.add_kline_days([])
-        missing = sdb.check_snapshot_health(lookback_days=7, db_path=self.db)
-        self.assertEqual(missing, [], "无 K 线覆盖时应跳过判断而不是全部报缺失")
+        """长假/周末不该产生连续缺失误报 —— 休市日不是"缺失"。
+
+        只在 t-4 与 t-1 两个交易日写了快照，中间的 t-3/t-2 当作长假休市：
+        检查结果必须为空。若把休市日也算作交易日，这里会报出连续缺失。
+        """
+        days = [self._recent_days(4)[0], self._recent_days(4)[-1]]
+        self._pin_trading_days(days)
+        pm = FakePositionManager(make_positions([
+            ['000620', '盈新发展', 1000, 1000, 5.0, 5.0, 5.5, 5500, 0.10]]))
+        self._write_snapshots(pm, days)
+
+        self.assertEqual(sdb.check_snapshot_health(lookback_days=6, db_path=self.db), [])
 
     def test_missing_day_detected(self):
-        today = datetime.now().date()
-        days = []
-        d = today - timedelta(days=1)
-        while len(days) < 2:
-            if d.weekday() < 5:
-                days.append(d.strftime('%Y-%m-%d'))
-            d -= timedelta(days=1)
-        self.add_kline_days(days)
+        days = self._recent_days(2)
+        self._pin_trading_days(days)
         missing = sdb.check_snapshot_health(lookback_days=7, db_path=self.db)
         self.assertEqual(len(missing), 2)
         events = self.query("SELECT * FROM run_events WHERE event_type=?",

@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 
 import config
 import db_migrate
+import trade_calendar
 from logger import get_logger
 
 logger = get_logger('settlement_db')
@@ -86,41 +87,8 @@ def log_event(event_type, level='INFO', detail=None, code=None,
 
 
 # ============================== 交易日历 ==============================
-
-def is_trading_day(date_str, db_path=None):
-    """判断是否交易日。
-
-    config 里只按周一至周五判断，没有节假日日历（utils.get_trading_days 的注释
-    直认"忽略了节假日"），长假会把 5~9 个休市日误判成"快照缺失"。
-    这里改用 stock_daily_data 反推：某日有 K 线即为交易日 —— 这是仓库内
-    唯一可得的真实日历，零新增依赖。
-
-    返回 (is_trading_day, confident)。日期落在 K 线覆盖范围之外时
-    confident=False，调用方应当降级为"周一至周五"判断而不是当作休市。
-    """
-    try:
-        conn = _connect(db_path)
-        try:
-            row = conn.execute(
-                "SELECT 1 FROM stock_daily_data WHERE date = ? LIMIT 1",
-                (date_str,)).fetchone()
-            if row:
-                return True, True
-            bounds = conn.execute(
-                "SELECT MIN(date), MAX(date) FROM stock_daily_data").fetchone()
-        finally:
-            conn.close()
-
-        lo, hi = (bounds[0], bounds[1]) if bounds else (None, None)
-        if not lo or not hi or date_str < lo or date_str > hi:
-            weekday_ok = datetime.strptime(date_str, '%Y-%m-%d').weekday() < 5
-            return weekday_ok, False
-        # 在覆盖范围内且无 K 线 —— 确信是休市日
-        return False, True
-    except Exception as e:
-        logger.warning(f"交易日判断失败({date_str}): {e}")
-        weekday_ok = datetime.strptime(date_str, '%Y-%m-%d').weekday() < 5
-        return weekday_ok, False
+# 交易日判定统一由 trade_calendar 提供（Tushare 权威日历 + 周一至周五降级），
+# 本模块不再自行维护日历实现。
 
 
 # ============================== 持仓快照 ==============================
@@ -439,7 +407,7 @@ def check_snapshot_health(lookback_days=7, db_path=None):
         try:
             for i in range(1, lookback_days + 1):
                 day = (today - timedelta(days=i)).strftime('%Y-%m-%d')
-                trading, confident = is_trading_day(day, db_path)
+                trading, confident = trade_calendar.is_trading_day_confident(day)
                 if not trading or not confident:
                     continue
                 got = {r['snapshot_type'] for r in conn.execute(
@@ -981,19 +949,18 @@ def should_run_close_snapshot(now, target_time, last_run_date, trading, confiden
     """判定此刻是否该写收盘快照。抽成纯函数以便单测覆盖各种日期组合。
 
     - 过了目标时刻、当天没跑过，是基本条件
-    - 确信是交易日 → 跑
-    - 判不出来（当天 K 线通常 15:30 后才入库）→ 降级为工作日判断，
-      宁可多写一次也不漏；但**周末必须排除**，否则会写出毫无意义的
-      非交易日快照（周六实测踩过）
-    - 确信是休市日（长假等）→ 不跑
+    - 是交易日 → 跑
+    - 不是交易日（含日历不可用时退化为"周一至周五"的周末）→ 不跑
+
+    trading/confident 由 trade_calendar.is_trading_day_confident() 提供。
+    原实现在此处还有一句 `(not confident) and now.weekday() < 5`，但那是死代码:
+    confident=False 时 trading 恒等于 weekday<5，故走到该行必然 weekday>=5。
     """
     if now.time() < target_time:
         return False
     if last_run_date == now.date():
         return False
-    if trading:
-        return True
-    return (not confident) and now.weekday() < 5
+    return trading
 
 
 def has_snapshot(snapshot_date, snapshot_type, db_path=None):
@@ -1048,7 +1015,7 @@ def schedule_close_snapshot(position_manager, stop_event=None):
         try:
             now = datetime.now()
             today = now.strftime('%Y-%m-%d')
-            trading, confident = is_trading_day(today)
+            trading, confident = trade_calendar.is_trading_day_confident(today)
             should_run = should_run_close_snapshot(
                 now, target_time, last_run_date, trading, confident)
             if should_run and has_snapshot(today, SNAPSHOT_CLOSE):

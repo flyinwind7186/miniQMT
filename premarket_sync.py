@@ -15,6 +15,7 @@ import json
 from datetime import datetime, timedelta
 from logger import get_logger
 import config
+import trade_calendar
 from config_manager import get_config_manager
 
 logger = get_logger(__name__)
@@ -41,6 +42,8 @@ class PreMarketSyncScheduler:
         """
         计算下次同步时间
 
+        交易日口径统一走 trade_calendar: 只跳周末会让长假期间每天空跑一次盘前同步。
+
         返回: datetime对象
         """
         now = datetime.now()
@@ -51,11 +54,9 @@ class PreMarketSyncScheduler:
         if now >= target:
             target += timedelta(days=1)
 
-        # 跳过周末 (周六=5, 周日=6)
-        while target.weekday() >= 5:
-            target += timedelta(days=1)
-
-        return target
+        # 顺延到下一个交易日(跳过周末与法定节假日)
+        next_day = trade_calendar.next_trading_day(target.date())
+        return datetime.combine(next_day, target.time())
 
     def load_persisted_schedule(self):
         """
@@ -129,7 +130,7 @@ class PreMarketSyncScheduler:
             window_end = sync_time + timedelta(minutes=self.compensation_window)
 
             # 额外守卫: 连续竞价开始前触发补偿，预挂窗口不应阻断盘前同步。
-            if (sync_time <= now <= window_end and now.weekday() < 5 and
+            if (sync_time <= now <= window_end and trade_calendar.is_trading_day(now.date()) and
                     not config.is_continuous_trade_time()):
                 logger.warning(
                     f"检测到reset场景(计划时间{persisted_time.strftime('%H:%M')},"

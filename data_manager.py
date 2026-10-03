@@ -12,6 +12,7 @@ import threading
 import xtquant.xtdata as xt
 import Methods
 import config
+import trade_calendar
 from logger import get_logger, suppress_stdout_stderr
 # from realtime_data_manager import get_realtime_data_manager
 
@@ -1046,18 +1047,19 @@ class DataManager:
         return True
 
     def _get_completed_history_end_date(self, now=None):
-        """返回适合日线历史数据补齐的最近已完成交易日。"""
+        """返回适合日线历史数据补齐的最近已完成交易日。
+
+        交易日口径统一走 trade_calendar: 长假期间按周内日会推出"昨天有日线",
+        实际那几天都是休市，补齐请求必然拿不到数据。
+        """
         current = now or datetime.now()
-        trade_days = set(getattr(config, 'TRADE_TIME', {}).get('trade_days', [1, 2, 3, 4, 5]))
         available_after = getattr(config, 'HISTORY_TODAY_DAILY_AVAILABLE_AFTER', '15:30:00')
 
-        if current.weekday() + 1 in trade_days and current.strftime('%H:%M:%S') >= available_after:
+        if (current.strftime('%H:%M:%S') >= available_after
+                and trade_calendar.is_trading_day(current.date())):
             return current.strftime('%Y%m%d')
 
-        day = current - timedelta(days=1)
-        while day.weekday() + 1 not in trade_days:
-            day -= timedelta(days=1)
-        return day.strftime('%Y%m%d')
+        return trade_calendar.previous_trading_day(current.date()).strftime('%Y%m%d')
 
     def _should_log_history_no_data_warning(self, stock_code, source, reason='empty'):
         """同一股票同一来源的历史空数据告警限频，避免生产日志刷屏。"""

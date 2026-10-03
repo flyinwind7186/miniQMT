@@ -51,6 +51,7 @@ import pandas as pd
 import config
 import db_migrate
 import settlement_db as sdb
+import trade_calendar
 
 
 POSITION_COLS = ['stock_code', 'stock_name', 'volume', 'available', 'cost_price',
@@ -271,7 +272,7 @@ class TestNoDuplicateBackfill(SnapshotFreshnessBase):
                 return None
 
         with patch.object(sdb, 'datetime', wraps=datetime) as mock_dt, \
-             patch.object(sdb, 'is_trading_day', return_value=(True, True)), \
+             patch.object(trade_calendar, 'is_trading_day_confident', return_value=(True, True)), \
              patch.object(sdb, '_connect', side_effect=lambda p=None: sqlite3.connect(self.db)), \
              patch.object(sdb, 'check_snapshot_health', return_value=[]):
             mock_dt.now.return_value = now

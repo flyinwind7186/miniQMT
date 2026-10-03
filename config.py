@@ -632,14 +632,15 @@ CONFIG_HISTORY_RETENTION_DAYS = 365      # 配置变更审计保留1年
 
 # ======================= 功能配置 =======================
 # 可下单时间配置：实盘包含 09:25-09:30 早盘预挂和 11:30-13:00 午休预挂。
-# DEBUG模式下使用24小时全周交易，方便测试。
+# 交易日一律由 trade_calendar 判定(权威日历 + 周一至周五降级)，此处不再维护周内日列表。
+# DEBUG模式下使用24小时全周交易，通过 ignore_trade_calendar 显式跳过日历判定。
 if DEBUG:
     TRADE_TIME = {
         "morning_start": "00:00:00",
         "morning_end": "23:59:59",
         "afternoon_start": "00:00:00",
         "afternoon_end": "23:59:59",
-        "trade_days": [1, 2, 3, 4, 5, 6, 7]  # 周一至周日
+        "ignore_trade_calendar": True
     }
 else:
     TRADE_TIME = {
@@ -647,7 +648,6 @@ else:
         "morning_end": "13:00:00",
         "afternoon_start": "13:00:00",
         "afternoon_end": "15:00:00",
-        "trade_days": [1, 2, 3, 4, 5]  # 周一至周五
     }
 
 # 连续竞价时间独立于预挂和调试开关，用于委托超时计时及严格市场时段判断。
@@ -656,7 +656,6 @@ CONTINUOUS_TRADE_TIME = {
     "morning_end": "11:30:00",
     "afternoon_start": "13:00:00",
     "afternoon_end": "15:00:00",
-    "trade_days": [1, 2, 3, 4, 5]
 }
 
 # ============ 新增: 盘前同步配置 ============
@@ -732,9 +731,22 @@ GRID_POSITION_QUERY_TIMEOUT = 5.0  # 网格交易持仓查询超时(秒)
 HISTORY_DATA_DOWNLOAD_TIMEOUT = 5  # 启动时单只股票历史数据下载超时（秒），超时则跳过
 GRID_LOCK_ACQUIRE_TIMEOUT = 5.0   # 网格交易锁获取超时(秒)
 
+def _is_trading_day(day, schedule):
+    """schedule 是否把该日算作交易日。
+
+    交易日口径统一走 trade_calendar（权威日历 + 周一至周五降级），本函数只负责
+    处理"该 schedule 显式声明忽略交易日历"的 DEBUG 全周模拟模式。
+
+    延迟导入 trade_calendar: logger 模块需要 config 常量，模块级互引会成环。
+    """
+    if schedule.get("ignore_trade_calendar"):
+        return True
+    import trade_calendar
+    return trade_calendar.is_trading_day(day)
+
+
 def _is_in_trade_schedule(now, schedule):
-    weekday = now.weekday() + 1
-    if weekday not in schedule["trade_days"]:
+    if not _is_trading_day(now.date(), schedule):
         return False
 
     current_time = now.strftime("%H:%M:%S")
@@ -778,7 +790,7 @@ def get_continuous_trading_seconds(start_time, end_time=None):
     )
 
     while current_date <= end_date:
-        if current_date.weekday() + 1 in CONTINUOUS_TRADE_TIME["trade_days"]:
+        if _is_trading_day(current_date, CONTINUOUS_TRADE_TIME):
             for window_start, window_end in windows:
                 start_clock = datetime.strptime(window_start, "%H:%M:%S").time()
                 end_clock = datetime.strptime(window_end, "%H:%M:%S").time()

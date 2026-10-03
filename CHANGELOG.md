@@ -8,17 +8,20 @@
 
 ### Added
 
-- **自动买入交易日历**：新增 `autobuy/trade_calendar.py`，服务启动时从 Tushare `trade_cal` 拉取 A 股交易日历并落本地缓存 `data/autobuy_trade_calendar.db`（回看 30 天 + 前推 370 天，运行期只读不联网）。候选池的“最近 N 个交易日”与 `only_trade_time` 的节假日判定统一走该日历。
+- **统一交易日历 `trade_calendar.py`（全仓唯一口径）**：新增根目录模块，启动时从 Tushare `trade_cal` 拉取 A 股交易日历并落本地缓存 `data/trade_calendar.db`（回看 30 天 + 前推 370 天，运行期只读不联网、进程内按日缓存）。对外提供 `is_trading_day` / `is_trading_day_confident` / `recent_trading_dates` / `previous_trading_day` / `next_trading_day` / `trading_days_between` / `refresh`。主程序 (`main.py`) 与自动买入服务启动时各刷新一次。
 - **自动买入启动日志**：启动时记录 PID、运行方式（实盘/模拟）、候选池与表、调度参数、风控参数，以及交易日历的来源与覆盖范围；无法取得权威日历时打 WARNING（每日去重）。
+- **`test/test_trade_calendar.py`**：日历本体与各调用点的节假日回归（已登记进完整集成测试清单）。
 
 ### Changed
 
+- **交易日判定全部收敛到 `trade_calendar`**：原先分散在各模块的“周一至周五”口径逐一替换 —— `config._is_in_trade_schedule` / `get_continuous_trading_seconds`（并删除 `TRADE_TIME`/`CONTINUOUS_TRADE_TIME` 的 `trade_days` 周内日列表，DEBUG 全周模式改用显式 `ignore_trade_calendar` 开关）、`settlement_db`（删除自带的 `stock_daily_data` 反推日历）、`premarket_sync`、`data_manager._get_completed_history_end_date`、`utils.get_trading_days`、`autobuy`（其日历模块迁到根目录，不再自带实现）。
 - **自动买入触发时刻 14:45 → 14:40**：原时点距 15:00 收盘仅 15 分钟，容错空间不足。
 - **交易日历取数失败不再写降级数据**：避免用“周一至周五”的近似值覆盖已有的权威日历；降级状态改由日志告警暴露，覆盖范围外的日期逐日返回“不可信”标记。
+- **`settlement_db.should_run_close_snapshot` 简化**：移除恒为 False 的 `(not confident) and weekday < 5` 死代码分支（`confident=False` 时 `trading` 恒等于 `weekday < 5`，该分支永远不可达）。
 
 ### Fixed
 
-- **长假被当成交易日**：`only_trade_time` 原先只依赖 `config.is_market_hours()`（周一至周五 + 连续竞价时段），2026-10-01 国庆长假首日被当成交易日，服务全天每 30 分钟空跑一轮完整筛选。现叠加交易日历节假日判定；daily 触发被跳过的日志也会区分“今日休市”与“非交易时段”，不再一律记成“非交易时段”。
+- **长假被当成交易日**：交易日判定原先按“周一至周五”处理，2026-10-01 国庆长假首日被当成交易日 —— 自动买入服务全天每 30 分钟空跑一轮完整筛选，`config.is_trade_time()` 放行下单窗口，`get_continuous_trading_seconds()` 把长假计入委托超时。现统一由交易日历判定；自动买入 daily 触发被跳过的日志也会区分“今日休市”与“非交易时段”，不再一律记成“非交易时段”。
 - **“本轮为什么不买”无法从日志回溯**：无标的通过条件时原先只记 DEBUG（文件日志为 INFO），现补一条带失败原因样本的 INFO 记录。
 
 ## [3.9.4] - 2026-09-30
