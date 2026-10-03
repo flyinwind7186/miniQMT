@@ -116,7 +116,7 @@ class AutoBuyConfig:
 
     # [schedule]
     mode: str = "both"
-    daily_times: list = field(default_factory=lambda: [(14, 45)])
+    daily_times: list = field(default_factory=lambda: [(14, 40)])
     interval_minutes: int = 30
     only_trade_time: bool = True
 

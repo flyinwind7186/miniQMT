@@ -2,8 +2,10 @@
 miniqmt_autobuy 候选池筛选。
 
 从 cfg 指定的 SQLite 多表中读取"运行日前 N 个交易日"入池的股票代码。
-判定口径: 以代码运行日期为基准，向前回溯 N 个交易日(周末自动跳过)，返回这些
-交易日期的所有 code。date 字段要求为标准日期文本 'YYYY-MM-DD'。
+判定口径: 以代码运行日期为基准，向前回溯 N 个交易日，返回这些交易日期的所有
+code。date 字段要求为标准日期文本 'YYYY-MM-DD'。
+
+交易日口径由 trade_calendar 提供(权威日历 + 周一至周五降级)，见该模块说明。
 
 候选池代码格式 (如 'sh.600025') 会统一转换为 miniQMT 系统标准格式 '600025.SH'。
 """
@@ -12,8 +14,8 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
-from datetime import date, datetime, timedelta
 
+from . import trade_calendar
 from .config import AutoBuyConfig, PROJECT_ROOT, get_autobuy_logger
 
 logger = get_autobuy_logger("autobuy.pool")
@@ -67,33 +69,13 @@ def to_xt_code(raw: str) -> str:
     return f"{num}.SZ"
 
 
-def _coerce_date(reference_date=None) -> date:
-    """把外部传入的日期统一转为 date，便于测试固定运行日。"""
-    if reference_date is None:
-        return date.today()
-    if isinstance(reference_date, datetime):
-        return reference_date.date()
-    if isinstance(reference_date, date):
-        return reference_date
-    if isinstance(reference_date, str):
-        return datetime.strptime(reference_date, "%Y-%m-%d").date()
-    raise TypeError(f"不支持的 reference_date 类型: {type(reference_date)!r}")
-
-
 def recent_trading_dates(n: int, reference_date=None) -> list:
     """返回运行日前最近 N 个交易日，按近到远排序。
 
-    当前采用本地工作日口径(周一至周五)，能正确处理周末；A 股法定节假日可后续
-    接入交易日历进一步精确化。
+    委托 trade_calendar: 日历覆盖范围内会正确跳过法定节假日；覆盖范围之外自动
+    退化为"周一至周五"，与旧口径一致。
     """
-    ref = _coerce_date(reference_date)
-    result = []
-    day = ref - timedelta(days=1)
-    while len(result) < n:
-        if day.weekday() < 5:
-            result.append(day.strftime("%Y-%m-%d"))
-        day -= timedelta(days=1)
-    return result
+    return trade_calendar.recent_trading_dates(n, reference_date)
 
 
 def read_candidates(cfg: AutoBuyConfig, reference_date=None) -> list:

@@ -99,9 +99,18 @@ python -m autobuy.app --once --simulate
 | `max_buys_per_run` | 每次触发最多买入数量 |
 | `simulation_mode` | 模拟运行；保留筛选、门禁、决策与状态记录，不发送真实买入请求 |
 | `mode` | `daily` / `interval` / `both` |
-| `daily_times` | 每日定点时间，逗号分隔 |
+| `daily_times` | 每日定点时间，逗号分隔（默认 `14:40`） |
 | `interval_minutes` | 固定间隔分钟数 |
-| `only_trade_time` | 仅真实交易时段触发，使用 `config.is_market_hours()` |
+| `only_trade_time` | 仅真实交易时段触发，叠加 `config.is_market_hours()` 时段判定与交易日历节假日判定 |
+
+### 交易日历
+
+A 股法定节假日（春节、国庆等连休 5~9 天）不能按“周一至周五”判断，否则整个长假会被当成交易日全天误触发。
+
+- 服务**启动时**从 Tushare `trade_cal` 无条件拉取一次并写入 `data/autobuy_trade_calendar.db`（回看 30 天 + 前推 370 天），运行期只读本地缓存，不联网。
+- 候选池的“最近 N 个交易日”与 `only_trade_time` 的节假日判定共用这份日历。
+- 取数失败或日期在缓存覆盖范围外时退化为“周一至周五”并打 WARNING；取数失败不写缓存，不会用近似值覆盖已有的权威日历。
+- 缓存路径可用环境变量 `MINIQMT_AUTOBUY_CALENDAR_DB` 覆盖。
 
 ---
 
@@ -111,9 +120,10 @@ python -m autobuy.app --once --simulate
 
 | 文件 | 说明 |
 |------|------|
-| `logs/miniqmt_autobuy.log` | 自动买入运行日志 |
+| `logs/miniqmt_autobuy.log` | 自动买入运行日志（含启动配置摘要与交易日历来源） |
 | `data/.autobuy_status.json` | 最近一轮状态摘要，供菜单 `[l]` 读取 |
 | `data/autobuy.db` | 买入历史与决策日志 |
+| `data/autobuy_trade_calendar.db` | 交易日历缓存，启动时刷新 |
 
 `data/autobuy.db` 主要包含：
 

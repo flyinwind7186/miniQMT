@@ -23,7 +23,7 @@ python -m autobuy.app  (独立进程, 由 miniqmt.bat [j] 启动)
 
 - **多表并集**:`tables = stg_chan, zs_pool`,**每张表各自**取运行日前最近 N 个交易日对应 `date` 的记录,
   再合并去重。比如运行日是周日 `2026-06-14`,`latest_n_dates=2` 会筛选 `2026-06-12` 和 `2026-06-11`。
-- **交易日口径**:当前按周一至周五回溯,自动跳过周末;A 股法定节假日可后续接入交易日历进一步精确化。
+- **交易日口径**:由 Tushare `trade_cal` 权威日历判定(见下节),覆盖范围外退化为周一至周五。
 - **代码格式自动转换**:候选池为 `sh.600025`/`sz.000626`(市场前缀在前),自动转成系统标准 `600025.SH`
   (见 `to_xt_code`)。防重比较统一按 6 位数字(`normalize_code`)。
 - **批量提示**:`stg_chan` 单个交易日可达数百只。`latest_n_dates=2` 可能产生两百余只候选;
@@ -34,6 +34,20 @@ python -m autobuy.app  (独立进程, 由 miniqmt.bat [j] 启动)
 候选池可能数百只,而每轮只买 `max_buys_per_run`(默认 1)只。为避免对全部候选做昂贵的逐只行情/指标检查:
 **先做大盘指数门禁 → 防重过滤 → 洗牌 → 顺序惰性检查,收集到所需数量即停**。对均匀洗牌列表取"前 k 个通过项",
 数学上等价于在全部通过标的中均匀随机选 k 只,但通常只需检查少量标的即命中。
+
+## 交易日历
+
+A 股法定节假日(春节/国庆等连休 5~9 天)不能按"周一至周五"判断,否则整个长假会被当成交易日,
+每 30 分钟空跑一轮完整筛选(2026-10-01 实测如此)。
+
+- **数据源**:Tushare `trade_cal`(SSE),复用项目已有的 `TUSHARE_TOKEN`,不引入新依赖
+- **启动刷新**:进程启动时**无条件**拉取一次并写入 `data/autobuy_trade_calendar.db`
+  (回看 30 天 + 前推 370 天)。服务可能连续运行数周,长假前必须拿到新日历
+- **运行期**:只读本地缓存,不联网
+- **降级**:取数失败或日期在缓存覆盖范围外时退化为"周一至周五",日志打 WARNING。
+  取数失败**不写缓存**,已有的权威日历不会被近似值覆盖;降级时宁可多跑一轮,
+  也不因为日历缺失而漏买
+- 缓存路径可用环境变量 `MINIQMT_AUTOBUY_CALENDAR_DB` 覆盖
 
 ## 大盘指数门禁
 
@@ -46,6 +60,7 @@ python -m autobuy.app  (独立进程, 由 miniqmt.bat [j] 启动)
 | `miniqmt_autobuy.cfg` | INI 配置 |
 | `config.py` | 配置解析 + 校验 + autobuy 独立 logger |
 | `pool.py` | 候选池筛选(多表/最近N个交易日/代码格式转换) |
+| `trade_calendar.py` | 交易日历(Tushare 刷新 + 本地缓存 + 周一至周五降级) |
 | `filter.py` | 买入条件检查 |
 | `client.py` | HTTP 下单 + 查持仓 |
 | `store.py` | 自有库 `data/autobuy.db`(防重 + 复盘) |
@@ -109,8 +124,8 @@ python -m autobuy.app --simulate            # 持续调度试跑
 
 ### [schedule] 触发
 - `mode` — `daily` / `interval` / `both`
-- `daily_times` — 每日定点(逗号分隔多个,如 `09:35,14:45`)
-- `interval_minutes` — 固定间隔(仅交易时段);`only_trade_time` 兜底
+- `daily_times` — 每日定点(逗号分隔多个,如 `09:35,14:40`)
+- `interval_minutes` — 固定间隔(仅交易时段);`only_trade_time` 兜底(时段 + 交易日历节假日)
 
 ## 启动与管理(miniqmt.bat 菜单)
 

@@ -17,9 +17,10 @@ import os
 import random
 import signal
 import threading
-from datetime import datetime
+from datetime import date, datetime
 
 import config
+from . import trade_calendar
 from .config import DEFAULT_CFG_PATH, PROJECT_ROOT, get_autobuy_logger, load_config
 from .pool import normalize_code, read_candidates
 from .store import AutoBuyStore
@@ -49,6 +50,7 @@ class AutoBuyApp:
         self._fired_daily = set()        # 当日已触发的 (h, m)
         self._fired_daily_date = None
         self._last_interval_run = datetime.now()  # 启动后等一个间隔再触发 interval
+        self._calendar_fallback_warned = None     # 交易日历降级告警的当日去重
 
     # ------------------------------------------------------------------
     # 单轮执行
@@ -98,6 +100,7 @@ class AutoBuyApp:
         need = self.cfg.max_buys_per_run
         chosen = []
         checked = 0
+        failures = []  # (code, 原因) 供"本轮无标的通过"时给日志留样本
         for code in eligible:
             if len(chosen) >= need:
                 break
@@ -112,7 +115,9 @@ class AutoBuyApp:
                 chosen.append(code)
                 logger.info(f"  ✓ {code} 通过条件检查")
             else:
-                logger.debug(f"  ✗ {code} 未通过: {reason.get('failed')}")
+                failed = reason.get("failed") or []
+                failures.append((code, "/".join(failed) or "未通过"))
+                logger.debug(f"  ✗ {code} 未通过: {failed}")
         status["checked"] = checked
         status["passed"] = len(chosen)
         logger.info(
@@ -120,7 +125,12 @@ class AutoBuyApp:
             f"命中 {len(chosen)}/{need} 只: {chosen}"
         )
         if not chosen:
-            logger.debug("检查完毕无标的通过条件，结束本轮")
+            # 条件明细此前只有 DEBUG(文件日志记 INFO) + 落库 decision_log，
+            # 排查"为什么不买"必须开 DEBUG 或查库；此处补一条带样本的 INFO。
+            logger.info(
+                f"检查完毕无标的通过条件，结束本轮(共检查 {checked} 只)"
+                + (f"；示例 {self._failure_samples(failures)}" if failures else "")
+            )
             self._write_status(status)
             return
 
@@ -144,6 +154,14 @@ class AutoBuyApp:
                 logger.warning(f"  下单失败: {code} -> {result}")
 
         self._write_status(status)
+
+    @staticmethod
+    def _failure_samples(failures: list, limit: int = 3) -> str:
+        """把未通过原因压成简短样本，避免大候选池把日志刷爆。"""
+        parts = [f"{code}: {why}" for code, why in failures[:limit]]
+        if len(failures) > limit:
+            parts.append(f"...另 {len(failures) - limit} 只")
+        return "；".join(parts)
 
     def _dedup_filter(self, codes: list) -> list:
         """过滤掉已持仓 / 防重窗口内已买过的股票。"""
@@ -172,9 +190,35 @@ class AutoBuyApp:
     # ------------------------------------------------------------------
     # 调度循环
     # ------------------------------------------------------------------
-    def _should_skip_non_trade(self) -> bool:
-        # 按真实市场时钟判断，避免模拟/调试模式下 is_trade_time() 恒为 True 的旁路
-        return self.cfg.only_trade_time and not config.is_market_hours()
+    def _non_trade_reason(self):
+        """返回本轮不可交易的原因；None 表示可以交易。
+
+        时段与节假日分开判定: 原实现只查 config.is_market_hours()(周一至周五 +
+        09:30~15:00)，法定节假日会被当成交易日全天误触发。交易日历拿不到当日权威
+        数据时按"可交易"处理并告警 —— 宁可多跑一轮完整筛选，也不能因为日历缺失漏买。
+        """
+        if not self.cfg.only_trade_time:
+            return None
+        if not config.is_market_hours():
+            return "非交易时段"
+        is_open_today, confident = trade_calendar.is_open(date.today())
+        if not confident:
+            self._warn_calendar_fallback()
+            return None
+        if not is_open_today:
+            return "今日休市(交易日历)"
+        return None
+
+    def _warn_calendar_fallback(self) -> None:
+        """交易日历降级为"周一至周五"时告警，每日一次。"""
+        today = date.today()
+        if self._calendar_fallback_warned == today:
+            return
+        self._calendar_fallback_warned = today
+        logger.warning(
+            "交易日历无当日权威数据，已退化为周一至周五口径"
+            " —— 法定节假日可能被误判为交易日"
+        )
 
     def _tick(self) -> None:
         now = datetime.now()
@@ -185,19 +229,22 @@ class AutoBuyApp:
             self._fired_daily.clear()
             self._fired_daily_date = now.date()
 
+        # 每 tick 只判定一次，daily/interval 共用同一结论
+        skip_reason = self._non_trade_reason()
+
         # daily 触发
         if mode in ("daily", "both"):
             for (h, m) in self.cfg.daily_times:
                 if now.hour == h and now.minute == m and (h, m) not in self._fired_daily:
                     self._fired_daily.add((h, m))
-                    if self._should_skip_non_trade():
-                        logger.info(f"daily {h:02d}:{m:02d} 命中但非交易时段，跳过")
+                    if skip_reason:
+                        logger.info(f"daily {h:02d}:{m:02d} 命中但{skip_reason}，跳过")
                     else:
                         self._safe_run(f"daily-{h:02d}:{m:02d}")
 
         # interval 触发: 仅在交易时段计时与触发。非交易时段完全静默，且不消费
         # 计时器，使开盘后能尽快触发首轮（而非从盘前的残留计时起算）。
-        if mode in ("interval", "both") and not self._should_skip_non_trade():
+        if mode in ("interval", "both") and skip_reason is None:
             elapsed = (now - self._last_interval_run).total_seconds()
             if elapsed >= self.cfg.interval_minutes * 60:
                 self._last_interval_run = now
@@ -249,6 +296,47 @@ class AutoBuyApp:
             pass
 
 
+def _log_startup_banner(cfg) -> None:
+    """记录本次启动的生效配置，复盘时不必再从 cfg 文件反推当时参数。"""
+    logger.info(
+        f"进程 PID={os.getpid()} 运行方式="
+        f"{'模拟(不下单)' if cfg.simulation_mode else '实盘(会真实下单)'}"
+    )
+    logger.info(
+        f"候选池: {cfg.db_path} 表={','.join(cfg.tables)} "
+        f"取运行日前 {cfg.latest_n_dates} 个交易日"
+    )
+    logger.info(
+        f"调度: mode={cfg.mode} daily={cfg.daily_times} "
+        f"interval={cfg.interval_minutes}min only_trade_time={cfg.only_trade_time}"
+    )
+    logger.info(
+        f"风控: 单轮最多买 {cfg.max_buys_per_run} 只，"
+        f"持仓防重={cfg.dedup_by_position}，历史防重窗口={cfg.dedup_window_days} 天"
+    )
+
+
+def _refresh_calendar_at_startup() -> None:
+    """启动时无条件刷新交易日历缓存。
+
+    进程可能连续运行数周，长假(国庆/春节)前必须拿到新日历；否则只剩
+    config.is_market_hours() 的周一至周五口径，会把整个长假当成交易日，
+    全天每 30 分钟空跑一轮完整筛选(2026-10-01 实测如此)。刷新失败只告警，
+    不阻断启动。
+    """
+    result = trade_calendar.refresh()
+    if result["degraded"]:
+        logger.warning(
+            "交易日历刷新失败，已退化为周一至周五口径(法定节假日会被误判为交易日): "
+            f"覆盖 {result['start']} ~ {result['end']} 共 {result['count']} 天"
+        )
+    else:
+        logger.info(
+            f"交易日历已刷新: source={result['source']} "
+            f"覆盖 {result['start']} ~ {result['end']} 共 {result['count']} 天"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="miniQMT 自动买入服务")
     parser.add_argument("--config", default=DEFAULT_CFG_PATH, help="配置文件路径")
@@ -267,6 +355,9 @@ def main() -> int:
 
     if args.simulate:
         cfg.simulation_mode = True
+
+    _log_startup_banner(cfg)
+    _refresh_calendar_at_startup()
 
     app = AutoBuyApp(cfg)
 

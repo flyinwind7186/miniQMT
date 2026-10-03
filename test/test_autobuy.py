@@ -8,7 +8,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -17,7 +17,14 @@ os.environ.setdefault(
     "MINIQMT_AUTOBUY_LOG_PATH",
     os.path.join(os.path.dirname(__file__), "logs", "miniqmt_autobuy_test.log"),
 )
+# 交易日历缓存必须隔离到临时目录: 否则用例会读写生产 data/autobuy_trade_calendar.db，
+# 结果随本机日历状态漂移。
+os.environ.setdefault(
+    "MINIQMT_AUTOBUY_CALENDAR_DB",
+    os.path.join(os.path.dirname(__file__), "logs", "trade_calendar_test.db"),
+)
 
+from autobuy import trade_calendar
 from autobuy.config import AutoBuyConfig, load_config
 from autobuy.pool import normalize_code, read_candidates, recent_trading_dates, to_xt_code
 from autobuy.filter import (
@@ -1145,15 +1152,17 @@ class TestSimulationMode(_AppFixtureMixin, unittest.TestCase):
 
 
 class TestScheduleTradeTime(unittest.TestCase):
-    """调度时段门禁: 非交易时段必须停止定时筛选。
+    """调度时段门禁: 非交易时段 / 法定节假日都必须停止定时筛选。
 
-    回归点: 修复前 autobuy 误用 config.is_trade_time()，该函数在模拟模式下恒为
-    True，导致非交易时段(如 19:00)仍触发完整筛选。改用 config.is_market_hours()
-    后按真实市场时钟判断。
+    回归点:
+      - 修复前 autobuy 误用 config.is_trade_time()，该函数在模拟模式下恒为 True，
+        导致非交易时段(如 19:00)仍触发完整筛选。改用 config.is_market_hours()
+        后按真实市场时钟判断。
+      - 2026-10-01 国庆长假首日仍被当成交易日全天触发 —— is_market_hours() 只按
+        周一至周五判断，必须再叠加交易日历。
     """
 
     def _app(self, only_trade_time=True):
-        from datetime import datetime, timedelta
         from autobuy.app import AutoBuyApp
         app = AutoBuyApp.__new__(AutoBuyApp)
         app.cfg = AutoBuyConfig()
@@ -1163,30 +1172,268 @@ class TestScheduleTradeTime(unittest.TestCase):
         app._fired_daily = set()
         app._fired_daily_date = None
         app._last_interval_run = datetime.now() - timedelta(hours=1)  # 确保 interval 已到点
+        app._calendar_fallback_warned = None
         app._safe_run = MagicMock()
         return app
 
+    @patch("autobuy.app.trade_calendar.is_open", return_value=(True, True))
     @patch("autobuy.app.config.is_market_hours", return_value=False)
-    def test_interval_skipped_outside_market_hours(self, _m):
+    def test_interval_skipped_outside_market_hours(self, _mh, _cal):
         app = self._app()
         before = app._last_interval_run
         app._tick()
         app._safe_run.assert_not_called()
         self.assertEqual(app._last_interval_run, before)  # 计时器未被消费 → 开盘后可立即触发
 
+    @patch("autobuy.app.trade_calendar.is_open", return_value=(True, True))
     @patch("autobuy.app.config.is_market_hours", return_value=True)
-    def test_interval_runs_in_market_hours(self, _m):
+    def test_interval_runs_in_market_hours(self, _mh, _cal):
         app = self._app()
         app._tick()
         app._safe_run.assert_called_once()
 
+    @patch("autobuy.app.trade_calendar.is_open", return_value=(True, True))
     @patch("autobuy.app.config.is_trade_time", return_value=True)
     @patch("autobuy.app.config.is_market_hours", return_value=False)
-    def test_simulation_bypass_does_not_resume_scheduling(self, _mh, _tt):
+    def test_simulation_bypass_does_not_resume_scheduling(self, _mh, _tt, _cal):
         # 即使 is_trade_time()=True(模拟旁路), 非交易时段仍须停止 —— 锁定原 bug
         app = self._app()
         app._tick()
         app._safe_run.assert_not_called()
+
+    @patch("autobuy.app.trade_calendar.is_open", return_value=(False, True))
+    @patch("autobuy.app.config.is_market_hours", return_value=True)
+    def test_holiday_blocks_even_inside_market_hours(self, _mh, _cal):
+        """2026-10-01 回归: 时段内但交易日历判定休市 → 不得触发。"""
+        app = self._app()
+        before = app._last_interval_run
+        app._tick()
+        app._safe_run.assert_not_called()
+        self.assertEqual(app._last_interval_run, before)
+
+    @patch("autobuy.app.trade_calendar.is_open", return_value=(False, True))
+    @patch("autobuy.app.config.is_market_hours", return_value=True)
+    def test_daily_skip_log_distinguishes_holiday_from_off_hours(self, _mh, _cal):
+        """daily 跳过的日志须区分"休市"与"非交易时段"。
+
+        原实现两种原因共用一句"命中但非交易时段，跳过"，长假被当成交易日这件事
+        在日志里完全看不出来。
+        """
+        app = self._app()
+        app.cfg.mode = "daily"
+        now = datetime.now()
+        app.cfg.daily_times = [(now.hour, now.minute)]
+
+        with self.assertLogs("autobuy", level="INFO") as cm:
+            app._tick()
+
+        app._safe_run.assert_not_called()
+        self.assertTrue(any("今日休市" in line for line in cm.output), cm.output)
+
+    @patch("autobuy.app.trade_calendar.is_open", return_value=(True, False))
+    @patch("autobuy.app.config.is_market_hours", return_value=True)
+    def test_unknown_calendar_does_not_block_trading(self, _mh, _cal):
+        """日历拿不到权威数据时不得漏买: 按可交易处理，但必须告警。"""
+        app = self._app()
+
+        with self.assertLogs("autobuy", level="WARNING") as cm:
+            app._tick()
+
+        app._safe_run.assert_called_once()
+        self.assertTrue(any("退化为周一至周五" in line for line in cm.output), cm.output)
+
+    def test_calendar_fallback_warning_is_daily_deduped(self):
+        """降级告警每 tick(30s) 都会命中，必须当日去重，否则刷屏。"""
+        app = self._app()
+        with patch("autobuy.app.logger") as mock_logger:
+            app._warn_calendar_fallback()
+            app._warn_calendar_fallback()
+            app._warn_calendar_fallback()
+        self.assertEqual(mock_logger.warning.call_count, 1)
+
+
+# ===========================================================================
+# 交易日历
+# ===========================================================================
+class TestTradeCalendar(unittest.TestCase):
+    """交易日历: Tushare 刷新 + 本地缓存 + 周一至周五降级。
+
+    回归点: 2026-10-01 国庆长假首日被当成交易日，服务全天每 30 分钟触发一轮完整
+    筛选。原口径只按周一至周五判断，长假整段误判。
+    """
+
+    # 2026-09-25 中秋、2026-10-01~10-07 国庆休市(与 Tushare trade_cal 实测一致)
+    _HOLIDAYS = {
+        "20260925", "20260926", "20260927",
+        "20261001", "20261002", "20261003", "20261004",
+        "20261005", "20261006", "20261007", "20261010", "20261011",
+    }
+
+    def setUp(self):
+        fd, self.db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        os.remove(self.db)  # _connect 会按需建库，先清掉 mkstemp 的空文件
+        self.addCleanup(lambda: os.path.exists(self.db) and os.remove(self.db))
+
+    def _rows(self):
+        rows = []
+        day = date(2026, 9, 1)
+        while day <= date(2026, 12, 31):
+            key = day.strftime("%Y%m%d")
+            rows.append((key, 0 if (key in self._HOLIDAYS or day.weekday() >= 5) else 1))
+            day += timedelta(days=1)
+        return rows
+
+    def _refresh(self, fetcher=None):
+        return trade_calendar.refresh(
+            today="2026-10-01", db_path=self.db, fetcher=fetcher or (lambda s, e: self._rows())
+        )
+
+    def test_refresh_reports_source_and_coverage(self):
+        result = self._refresh()
+        self.assertEqual(result["source"], "tushare")
+        self.assertFalse(result["degraded"])
+        self.assertGreater(result["count"], 100)
+        self.assertEqual(result["start"], "2026-09-01")
+        self.assertEqual(result["end"], "2027-10-06")
+
+    def test_is_open_uses_calendar_not_weekday(self):
+        self._refresh()
+        # 2026-10-01 周四: 周一至周五口径会判成开市，日历口径必须判休市
+        self.assertEqual(trade_calendar.is_open("2026-10-01", self.db), (False, True))
+        # 2026-09-25 周五(中秋) 同理
+        self.assertEqual(trade_calendar.is_open("2026-09-25", self.db), (False, True))
+        self.assertEqual(trade_calendar.is_open("2026-09-30", self.db), (True, True))
+        self.assertEqual(trade_calendar.is_open("2026-10-12", self.db), (True, True))
+
+    def test_is_open_outside_coverage_degrades_without_confidence(self):
+        """覆盖范围外的日期退回周一至周五，且必须标记 confident=False。"""
+        self._refresh()
+        is_open_, confident = trade_calendar.is_open("2030-01-07", self.db)  # 周一
+        self.assertTrue(is_open_)
+        self.assertFalse(confident)
+
+    def test_refresh_failure_does_not_clobber_existing_calendar(self):
+        """取数失败时不得用"周一至周五"近似值覆盖已有的权威日历。"""
+        self._refresh()  # 先写入权威日历
+
+        def boom(start, end):
+            raise RuntimeError("tushare down")
+
+        result = self._refresh(fetcher=boom)
+
+        self.assertEqual(result["source"], "weekday_fallback")
+        self.assertTrue(result["degraded"])
+        self.assertEqual(result["count"], 0)
+        # 权威日历原样保留: 2026-10-01 仍是休市
+        self.assertEqual(trade_calendar.is_open("2026-10-01", self.db), (False, True))
+
+    def test_refresh_failure_on_empty_cache_degrades_without_confidence(self):
+        """缓存为空且取数失败: 读取时退化为周一至周五，但必须标记不可信。"""
+
+        def boom(start, end):
+            raise RuntimeError("tushare down")
+
+        self._refresh(fetcher=boom)
+
+        is_open_, confident = trade_calendar.is_open("2026-10-01", self.db)
+        self.assertTrue(is_open_)      # 周一至周五口径把周四当开市
+        self.assertFalse(confident)    # → 调用方据此告警，而不是静默采信
+
+    def test_legacy_weekday_fallback_rows_are_not_trusted(self):
+        """库里遗留的降级行同样不算权威，避免旧版本的近似值被当成日历。"""
+        trade_calendar.upsert_calendar(
+            [("20261001", 1)], source="weekday_fallback", db_path=self.db
+        )
+        self.assertEqual(trade_calendar.is_open("2026-10-01", self.db), (True, False))
+
+    def test_recent_trading_dates_skips_holiday_block(self):
+        """2026-10-09 往前回溯: 10-08 开市，再往前应跨过整个国庆落到 09-30。
+
+        周一至周五口径会给出 10-07(休市)，把候选池日期整体打偏。
+        """
+        self._refresh()
+        self.assertEqual(
+            trade_calendar.recent_trading_dates(2, "2026-10-09", self.db),
+            ["2026-10-08", "2026-09-30"],
+        )
+        self.assertEqual(
+            trade_calendar.recent_trading_dates(1, "2026-10-12", self.db),
+            ["2026-10-09"],
+        )
+
+    def test_recent_trading_dates_without_calendar_matches_old_weekday_behaviour(self):
+        """日历缺失时必须与旧口径一致(周一至周五)，不能改变既有行为。"""
+        self.assertEqual(
+            trade_calendar.recent_trading_dates(2, "2026-06-14", self.db),
+            ["2026-06-12", "2026-06-11"],
+        )
+
+
+class TestPoolUsesTradeCalendar(unittest.TestCase):
+    """候选池的"最近 N 个交易日"必须走交易日历，而不是周内日。"""
+
+    def setUp(self):
+        fd, self.db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.addCleanup(lambda: os.remove(self.db))
+        conn = sqlite3.connect(self.db)
+        conn.execute("CREATE TABLE stg_chan (id INTEGER PRIMARY KEY, code TEXT, date TEXT)")
+        conn.executemany("INSERT INTO stg_chan (code, date) VALUES (?, ?)", [
+            ("sh.600025", "2026-10-08"),  # 节后首个交易日
+            ("sh.600030", "2026-10-07"),  # 国庆休市，不应被选入
+            ("sh.600036", "2026-09-30"),  # 节前最后一个交易日
+        ])
+        conn.commit()
+        conn.close()
+
+        fd, self.cal = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        os.remove(self.cal)
+        self.addCleanup(lambda: os.path.exists(self.cal) and os.remove(self.cal))
+
+    def test_candidates_skip_holiday_dates(self):
+        from autobuy import trade_calendar as tc
+
+        holidays = {"20261001", "20261002", "20261003", "20261004",
+                    "20261005", "20261006", "20261007"}
+        tc.refresh(
+            today="2026-10-01", db_path=self.cal,
+            fetcher=lambda s, e: [
+                ((date(2026, 9, 1) + timedelta(days=i)).strftime("%Y%m%d"),
+                 0 if ((date(2026, 9, 1) + timedelta(days=i)).strftime("%Y%m%d") in holidays
+                       or (date(2026, 9, 1) + timedelta(days=i)).weekday() >= 5) else 1)
+                for i in range(200)
+            ],
+        )
+        with patch.object(tc, "cache_path", lambda override=None: self.cal):
+            cfg = AutoBuyConfig()
+            cfg.db_path = self.db
+            cfg.tables = ["stg_chan"]
+            cfg.latest_n_dates = 2
+            codes = read_candidates(cfg, reference_date="2026-10-09")
+
+        # 目标交易日为 10-08 与 09-30；10-07(休市) 的行不得被带入
+        self.assertIn("600025.SH", codes)
+        self.assertIn("600036.SH", codes)
+        self.assertNotIn("600030.SH", codes)
+
+    def test_recent_trading_dates_delegates_to_calendar(self):
+        with patch.object(trade_calendar, "recent_trading_dates",
+                          return_value=["2026-10-08"]) as mock_dates:
+            self.assertEqual(recent_trading_dates(1, "2026-10-09"), ["2026-10-08"])
+        mock_dates.assert_called_once_with(1, "2026-10-09")
+
+
+class TestShippedScheduleCfg(unittest.TestCase):
+    """仓库内实际部署的调度配置。"""
+
+    def test_daily_trigger_is_1440(self):
+        """2026-10 调整为 14:40: 原 14:45 距收盘仅 15 分钟，容错空间不足。"""
+        from autobuy.config import DEFAULT_CFG_PATH
+        cfg = load_config(DEFAULT_CFG_PATH)
+        self.assertEqual(cfg.daily_times, [(14, 40)])
+        self.assertEqual(AutoBuyConfig().daily_times, [(14, 40)])
 
 
 if __name__ == "__main__":
