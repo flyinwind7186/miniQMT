@@ -253,7 +253,7 @@ curl -X POST http://localhost:5000/api/grid/stop \
 | `GRID_BUY_COOLDOWN` | 300 秒 | 买入成功后全局冷却 |
 | `GRID_SELL_COOLDOWN` | 300 秒 | 卖出成功后全局冷却 |
 
-卖出冷却带**价格豁免**：当触发价比上次成交价高 `GRID_SELL_COOLDOWN_PRICE_THRESHOLD`（默认 2%）
+卖出冷却带**价格豁免**（v3.9.5 起）：当触发价比上次成交价高 `GRID_SELL_COOLDOWN_PRICE_THRESHOLD`（默认 2%）
 且距上次卖出超过 `GRID_SELL_COOLDOWN_PRICE_EXEMPT_SECONDS`（默认 30 秒）时放行，不等满 300 秒。
 网格重建中心价后价格穿越**新档位**属于合法卖出，不应被冷却期按"同档位重复下单"拦下
 （2026-10-15 实盘：重建后档位 14.25 被穿越、较上次成交价 13.70 涨 4.4%，仍被 150 秒时间门否决）。

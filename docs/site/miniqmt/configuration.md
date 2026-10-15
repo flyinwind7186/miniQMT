@@ -292,6 +292,8 @@ DYNAMIC_TAKE_PROFIT = [
 | `GRID_LEVEL_COOLDOWN` | `60` | 同一档位冷却时间（秒） |
 | `GRID_BUY_COOLDOWN` | `300` | 买入成功后冷却（秒） |
 | `GRID_SELL_COOLDOWN` | `300` | 卖出成功后冷却（秒） |
+| `GRID_SELL_COOLDOWN_PRICE_THRESHOLD` | `0.02` | 卖出冷却的价格豁免阈值：触发价高于上次成交价该比例时按下一行的窗口放行；`0` 禁用 |
+| `GRID_SELL_COOLDOWN_PRICE_EXEMPT_SECONDS` | `30` | 价格豁免的最短间隔（秒），须小于 `GRID_SELL_COOLDOWN`；网格重建后新档位的合法卖出不应被冷却期按“同档位重复下单”拦下 |
 | `GRID_REQUIRE_PROFIT_TRIGGERED` | `False` | 是否要求持仓已触发首次止盈后才能启动网格；默认不要求，设为 `True` 可恢复更保守风控 |
 | `grid_trading_sessions.enabled` | `1` | 单个网格会话自动执行开关；Web 中显示为“自动/暂停”，暂停后保留会话但不再发新网格单 |
 | `GRID_MAX_DEVIATION_RATIO` | `0.15` | 最大偏离中心价比例（±15%） |

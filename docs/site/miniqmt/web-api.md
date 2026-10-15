@@ -125,6 +125,19 @@ miniQMT 提供 RESTful API。Flask 直连模式暴露完整 web1.0 API；xtquant
     实盘网格在 `GRID_CONFIRM_LIVE_ORDER_BY_DEAL = True` 时，`/api/trade-records` 只返回真实成交确认后的 `trade_records`。已报未成交的网格委托只体现在 `grid_orders` / 网格会话状态中，不会以 `ORDER_xxx` 形式伪装成成交。
     动态止盈止损的实盘卖出委托也遵循成交确认语义：首次止盈半仓提交成功不等于 `profit_triggered=True`，成交回报到达后才更新持仓状态与持久化字段。
 
+!!! note "对账补记流水  [v3.9.5]"
+    推送通道失效或外部成交（QMT 客户端策略单/手工单）时，流水由**持仓同步处的当日成交对账**
+    补齐（`TradingExecutor.reconcile_missing_trades()`，挂在持仓同步之后：本进程首次成功同步、
+    以及每次发现新增持仓各触发一次）。监控/前端侧需要知道三点：
+
+    - 记录可能在**重启后**才出现，且 `trade_time` 早于当前时刻——这是补记，不是延迟成交
+    - 本机没下过的单标 `strategy='external'`（显示"外部"）；同一委托的多笔分笔各占一行
+    - 补记行 `time_source` 为 `exchange`（成交查询带回了真实成交时间）或 `reconcile_backfill`
+      （拿不到成交时间，`trade_time` 即补记时刻）。该字段只在导出交割单的诊断列中可见，
+      `/api/trade-records` 不下发
+
+    对账幂等：同一笔成交不会被写第二遍（详见[交割单数据管道](settlement-export.md#push-outage-reconcile)）。
+
 !!! tip "交易时间格式兼容"
     `trade_records.trade_time` 在库中可能混合多种写法：QMT 成交回报带微秒（`2026-07-31 09:31:50.610000`）、系统内部写入为秒级（`2026-07-31 09:30:44`），历史数据还可能是 ISO（含 `T` 分隔符）。`_format_trade_time_for_response()` 依次尝试带微秒/不带微秒的严格解析，再回退到 `pd.to_datetime`，全部失败才原样返回并记 WARNING。此前统一走 `pd.to_datetime` 在混合格式下会整列抛错，导致交易记录接口 500。
 

@@ -6,10 +6,18 @@
 
 ## [Unreleased]
 
+## [3.9.5] - 2026-10-15
+
+> 本版本把**交易日判定收敛到唯一日历**（消除长假被当成交易日的整段误判），
+> 并修复**推送通道失效下的成交流水缺失** —— 后者暴露的不是回调本身，而是
+> 「兜底路径也有窟窿」：一笔委托只记首笔分笔、外部成交无人记账。
+
 ### Added
 
 - **统一交易日历 `trade_calendar.py`（全仓唯一口径）**：新增根目录模块，启动时从 Tushare `trade_cal` 拉取 A 股交易日历并落本地缓存 `data/trade_calendar.db`（回看 30 天 + 前推 370 天，运行期只读不联网、进程内按日缓存）。对外提供 `is_trading_day` / `is_trading_day_confident` / `recent_trading_dates` / `previous_trading_day` / `next_trading_day` / `trading_days_between` / `refresh`。主程序 (`main.py`) 与自动买入服务启动时各刷新一次。
 - **自动买入启动日志**：启动时记录 PID、运行方式（实盘/模拟）、候选池与表、调度参数、风控参数，以及交易日历的来源与覆盖范围；无法取得权威日历时打 WARNING（每日去重）。
+- **成交流水对账补流水 `TradingExecutor.reconcile_missing_trades()`**：以当日成交查询为准补齐缺失流水，挂在持仓同步之后（本进程首次成功同步 + 每次发现新增持仓各触发一次）。判重按**委托**逐层收敛——该委托已入库量合计 ≥ 成交合计则整单跳过（网格按委托聚合落一行，逐笔比对会重复入账），否则按「价+量」多重集抵扣；幂等。这条同时兜住**外部成交**（QMT 客户端策略单/手工单原先只在回调里识别）。
+- **网格卖出冷却的价格豁免窗口**：新增 `GRID_SELL_COOLDOWN_PRICE_EXEMPT_SECONDS`（默认 30 秒），触发价高于上次成交价 `GRID_SELL_COOLDOWN_PRICE_THRESHOLD` 时按该窗口放行。
 - **`test/test_trade_calendar.py`**：日历本体与各调用点的节假日回归（已登记进完整集成测试清单）。
 
 ### Changed
@@ -18,11 +26,30 @@
 - **自动买入触发时刻 14:45 → 14:40**：原时点距 15:00 收盘仅 15 分钟，容错空间不足。
 - **交易日历取数失败不再写降级数据**：避免用“周一至周五”的近似值覆盖已有的权威日历；降级状态改由日志告警暴露，覆盖范围外的日期逐日返回“不可信”标记。
 - **`settlement_db.should_run_close_snapshot` 简化**：移除恒为 False 的 `(not confident) and weekday < 5` 死代码分支（`confident=False` 时 `trading` 恒等于 `weekday < 5`，该分支永远不可达）。
+- **委托超时检查前置到空仓 `continue` 之前**：委托独立于持仓列表，“没有持仓”不等于“没有在途委托”，而清仓往往正是那笔挂单造成的。
+- **首次止盈卖出量改为按执行时刻的可用持仓重算**：信号里的 `volume` 只是检测时刻快照，策略线程单股消费周期可达 10+ 秒，其间网格或其它策略可能已卖出同一只股票（`TradingStrategy._resolve_sell_base_volume`，读不到才退回快照）。
+- **网格卖出冷却的价格豁免时间门 150 秒 → 30 秒**：原 `sell_cooldown // 2` 会把网格重建后新档位的合法卖出一并拦下；总冷却期仍为 300 秒。冷却日志同时补上已过秒数、触发价与上次卖出价，不再只留一句“卖出冷却中”。
 
 ### Fixed
 
 - **长假被当成交易日**：交易日判定原先按“周一至周五”处理，2026-10-01 国庆长假首日被当成交易日 —— 自动买入服务全天每 30 分钟空跑一轮完整筛选，`config.is_trade_time()` 放行下单窗口，`get_continuous_trading_seconds()` 把长假计入委托超时。现统一由交易日历判定；自动买入 daily 触发被跳过的日志也会区分“今日休市”与“非交易时段”，不再一律记成“非交易时段”。
 - **“本轮为什么不买”无法从日志回溯**：无标的通过条件时原先只记 DEBUG（文件日志为 INFO），现补一条带失败原因样本的 INFO 记录。
+- **清仓后成交流水丢失**（2026-10-08 实盘 300792 止损卖出 3700 股）：持仓于 13:51:16 清零后监控循环进入 `positions_df.empty` 分支并 `continue`，而 `check_pending_orders_timeout()` 位于循环尾部被整段跳过 —— 该委托此后既无超时检查、也无撤单、也无成交兜底确认，流水从未落库（券商资金流比本地库多出 93,203 元）。
+- **分笔成交只落首笔**（2026-10-15 实盘）：`confirm_live_order_filled()` 遍历当日成交时**首笔命中即返回**。止盈单 2014314498 实际 4 笔分笔（800+1500+1100+200=3600 股），只入库 800 股，2800 股 / 38,332 元无流水。
+- **外部成交没有流水入口**（2026-10-15 实盘）：002961 于 09:50:05 由 QMT 模型交易买入 5700 股 / 79,492 元，系统 09:50:13 只发现持仓、没写流水——外部成交只在回调里识别，回调失效即无人记账。
+- **`parse_deal_time` 不认 `pandas.Timestamp`**：成交查询把 `traded_time` 转成了 naive-UTC Timestamp，解析失败后 `trade_time` 退化成“补记时刻”，等于伪造成交时间。现按 pandas 的 UTC 基准还原；仍解析不出才标 `reconcile_backfill`。
+- **首次止盈卖出量按过期快照计算**（2026-10-15 实盘）：信号携带检测时刻快照 6100 股，6 秒后执行时可卖只剩 4600 股（网格抢先卖出 1500 股），按快照算的 3600 股使实际卖出比例变成 84%（设计意图 60%）。
+- **网格重建后新档位的合法卖单被冷却时间门否决**（2026-10-15 实盘）：网格已重建（中心 12.93→13.70，新档位 14.25），价格较上次成交价 13.70 涨 4.4% 触发卖出，仍被 `elapsed ≥ 300//2 = 150` 秒的时间门拦下。
+
+### Documentation
+
+- 更新交割单数据管道（对账补流水与 `time_source` 口径）、止盈止损（卖出量基准）、网格交易（价格豁免）、Web 前端与 Web API（重启后补记流水的识别）、快速开始、架构、配置参考与测试统计。
+
+### Tests
+
+- 新增分笔全落、外部成交记 `external`、网格聚合不重复入账、对账触发与幂等（`test_h6`~`test_h9`），以及卖出基准量按执行时刻可用持仓重算 / 读不到时退回快照（`L3_08d` / `L3_08e`）。
+- 修正 `test_history_data_source_routing` 两例：标准模式链路是「Tushare 优先 → Mootdx 兜底」，用例未屏蔽 Tushare 分支，配置了 `TUSHARE_TOKEN` 的环境必然假失败（已用 HEAD 干净副本 + 同一份 `.env` 复现）。
+- 2026-10-15 使用 Anaconda `python39` 执行 `--all-with-fast`：**37 组、160 模块、3496 用例，3496 通过、0 失败、0 错误、0 跳过，成功率 100%**，耗时 684.42 秒。
 
 ## [3.9.4] - 2026-09-30
 
@@ -1117,7 +1144,8 @@
 - 模拟交易模式（无需 QMT 即可验证策略）
 - 回归测试框架基础设施
 
-[Unreleased]: https://github.com/weihong-su/miniQMT/compare/v3.9.4...HEAD
+[Unreleased]: https://github.com/weihong-su/miniQMT/compare/v3.9.5...HEAD
+[3.9.5]: https://github.com/weihong-su/miniQMT/compare/v3.9.4...v3.9.5
 [3.9.4]: https://github.com/weihong-su/miniQMT/compare/v3.9.3...v3.9.4
 [3.9.3]: https://github.com/weihong-su/miniQMT/compare/v3.9.2...v3.9.3
 [3.9.2]: https://github.com/weihong-su/miniQMT/compare/v3.9.1...v3.9.2
