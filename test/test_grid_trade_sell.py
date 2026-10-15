@@ -622,12 +622,12 @@ class TestGridTradeSell(unittest.TestCase):
         print("[OK] 卖出冷却机制验证通过")
 
     def test_adaptive_cooldown_allows_higher_price(self):
-        """自适应冷却：触发价高于上次成交价2%时，冷却期减半后允许执行
+        """价格豁免：触发价高于上次成交价2%时，间隔超过豁免窗口(30s)即允许执行
 
-        场景：GRID_SELL_COOLDOWN=300s，卖出后160s，触发价比上次高3%（>2%阈值）
-        → 冷却缩短为150s → 160s已超过150s → 允许卖出
+        场景：GRID_SELL_COOLDOWN=300s，卖出后40s，触发价比上次高3%（>2%阈值）
+        → 价格豁免窗口30s → 40s已超过30s → 允许卖出
         """
-        print("\n========== 自适应冷却: 高价允许执行 ==========")
+        print("\n========== 价格豁免: 涨幅达标且过豁免窗口即允许执行 ==========")
 
         config.ENABLE_SIMULATION_MODE = True
 
@@ -643,8 +643,8 @@ class TestGridTradeSell(unittest.TestCase):
         last_sell_price = 10.5
         higher_trigger_price = round(last_sell_price * 1.031, 2)  # 涨3.1% > 2%阈值
 
-        # 预设上次卖出时间（160秒前）和价格
-        self.manager.last_sell_times[session.id] = time.time() - 160
+        # 预设上次卖出时间（40秒前）和价格
+        self.manager.last_sell_times[session.id] = time.time() - 40
         self.manager.last_sell_prices[session.id] = last_sell_price
 
         signal = {
@@ -662,16 +662,16 @@ class TestGridTradeSell(unittest.TestCase):
 
         self.assertTrue(result,
                         f"触发价{higher_trigger_price}比上次{last_sell_price}高3.1%>2%阈值，"
-                        f"160s>150s(半冷却)，应允许卖出")
-        print(f"[OK] 自适应冷却缩短生效: {last_sell_price:.2f}→{higher_trigger_price:.2f}, 160s≥150s, 允许执行")
+                        f"40s>30s(价格豁免窗口)，应允许卖出")
+        print(f"[OK] 价格豁免生效: {last_sell_price:.2f}→{higher_trigger_price:.2f}, 40s≥30s, 允许执行")
 
-    def test_adaptive_cooldown_blocks_within_half_cooldown(self):
-        """自适应冷却：触发价高于阈值但仍在半冷却期内时继续阻止
+    def test_adaptive_cooldown_blocks_within_exempt_window(self):
+        """价格豁免窗口内仍阻止：涨幅达标但距上次卖出不足30秒
 
-        场景：GRID_SELL_COOLDOWN=300s，卖出后100s，触发价比上次高3%
-        → 冷却缩短为150s → 100s<150s → 仍应阻止
+        场景：GRID_SELL_COOLDOWN=300s，卖出后10s，触发价比上次高3%
+        → 价格豁免窗口30s → 10s<30s → 仍应阻止
         """
-        print("\n========== 自适应冷却: 半冷却期内仍阻止 ==========")
+        print("\n========== 价格豁免: 窗口内仍阻止 ==========")
 
         config.ENABLE_SIMULATION_MODE = True
 
@@ -687,8 +687,8 @@ class TestGridTradeSell(unittest.TestCase):
         last_sell_price = 10.5
         higher_trigger_price = round(last_sell_price * 1.031, 2)  # 涨3.1% > 2%阈值
 
-        # 预设上次卖出时间（100秒前）- 不足半冷却期150s
-        self.manager.last_sell_times[session.id] = time.time() - 100
+        # 预设上次卖出时间（10秒前）- 不足价格豁免窗口30s
+        self.manager.last_sell_times[session.id] = time.time() - 10
         self.manager.last_sell_prices[session.id] = last_sell_price
 
         signal = {
@@ -705,8 +705,8 @@ class TestGridTradeSell(unittest.TestCase):
                 result = self.manager._execute_grid_sell(session, signal)
 
         self.assertFalse(result,
-                         f"触发价高但100s<150s半冷却期，仍应阻止")
-        print(f"[OK] 半冷却期保护: 100s<150s, 仍阻止")
+                         f"触发价高但10s<30s价格豁免窗口，仍应阻止")
+        print(f"[OK] 价格豁免窗口保护: 10s<30s, 仍阻止")
 
     def test_adaptive_cooldown_no_effect_when_price_not_higher(self):
         """自适应冷却：触发价未超过阈值时使用完整冷却期

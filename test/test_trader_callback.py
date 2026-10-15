@@ -37,13 +37,15 @@ import sqlite3
 import threading
 import unittest
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch, call
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
+import db_migrate
 import position_manager
+import settlement_db
 from test.test_base import TestBase
 from position_manager import PositionManager
 from trading_executor import TradingExecutor
@@ -2602,6 +2604,206 @@ class TestTraderCallback(TestBase):
 
         status = self.pm._query_order_status("301560", "940572805")
         self.assertEqual(status, 56)
+
+    def _prepare_trade_records_extended_schema(self, executor):
+        """给测试用的内存表补齐扩展列（生产库由 db_migrate 负责），返回需恢复的 schema 缓存原值。"""
+        for column, typedef in db_migrate.TRADE_RECORDS_NEW_COLUMNS:
+            try:
+                executor.conn.execute(f"ALTER TABLE trade_records ADD COLUMN {column} {typedef}")
+            except sqlite3.OperationalError:
+                pass
+        for name, ddl in db_migrate.TRADE_RECORDS_INDEXES:
+            db_migrate.ensure_index(executor.conn, name, ddl)
+        executor.conn.commit()
+        # record_trade 按 db_path 缓存「扩展列是否就绪」，缓存键是生产库路径，
+        # 这里显式放行，由调用方在 finally 中恢复，避免污染同进程的其他用例
+        previous = settlement_db._SCHEMA_CACHE.get(config.DB_PATH)
+        settlement_db._SCHEMA_CACHE[config.DB_PATH] = True
+        return previous
+
+    def _restore_schema_cache(self, previous):
+        if previous is None:
+            settlement_db._SCHEMA_CACHE.pop(config.DB_PATH, None)
+        else:
+            settlement_db._SCHEMA_CACHE[config.DB_PATH] = previous
+
+    @staticmethod
+    def _deal_timestamp(hour, minute, second):
+        """按 easy_qmt_trader.query_stock_trades 的口径构造成交时间: epoch 秒 → naive UTC Timestamp。"""
+        epoch = int(datetime(2026, 10, 15, hour, minute, second,
+                             tzinfo=timezone(timedelta(hours=8))).timestamp())
+        return pd.to_datetime(epoch, unit="s")
+
+    def _seed_trade_record(self, executor, **fields):
+        columns = ["stock_code", "trade_time", "trade_type", "price", "volume", "amount",
+                   "trade_id", "strategy", "order_id", "row_status"]
+        values = [fields.get(name) for name in columns]
+        executor.conn.execute(
+            f"INSERT INTO trade_records ({', '.join(columns)}) "
+            f"VALUES ({', '.join('?' for _ in columns)})",
+            values
+        )
+        executor.conn.commit()
+
+    def test_h6_confirm_filled_from_query_records_all_partial_fills(self):
+        """兜底查询命中多笔分笔时必须逐笔全部补写（2026-10-15 实盘 3600 股只记了首笔 800 股）"""
+        executor = self._make_live_executor()
+        order_id = "2014314498"
+        fills = pd.DataFrame([
+            {"订单编号": order_id, "证券代码": "300434", "成交编号": "86050103000003602556",
+             "成交均价": 13.69, "成交数量": 800, "成交金额": 10952.0, "委托类型": 24},
+            {"订单编号": order_id, "证券代码": "300434", "成交编号": "86060103000003602810",
+             "成交均价": 13.69, "成交数量": 1500, "成交金额": 20535.0, "委托类型": 24},
+            {"订单编号": order_id, "证券代码": "300434", "成交编号": "86070103000003603105",
+             "成交均价": 13.69, "成交数量": 1100, "成交金额": 15059.0, "委托类型": 24},
+            {"订单编号": order_id, "证券代码": "300434", "成交编号": "86080103000003603879",
+             "成交均价": 13.69, "成交数量": 200, "成交金额": 2738.0, "委托类型": 24},
+        ])
+        executor.query_stock_trades = MagicMock(return_value=fills)
+        executor.order_cache[order_id] = {
+            "stock_code": "300434",
+            "strategy": "auto_partial",
+            "trade_type": "SELL",
+        }
+
+        old_sim = config.ENABLE_SIMULATION_MODE
+        try:
+            config.ENABLE_SIMULATION_MODE = False
+            self.assertTrue(executor.confirm_live_order_filled(order_id))
+        finally:
+            config.ENABLE_SIMULATION_MODE = old_sim
+
+        rows = executor.conn.execute(
+            "SELECT volume, price, strategy, trade_type FROM trade_records ORDER BY id"
+        ).fetchall()
+        self.assertEqual([r[0] for r in rows], [800, 1500, 1100, 200])
+        self.assertEqual(sum(r[0] for r in rows), 3600)
+        self.assertEqual({r[2] for r in rows}, {"auto_partial"})
+        self.assertEqual({r[3] for r in rows}, {"SELL"})
+
+    def test_h7_reconcile_backfills_partial_fills_and_external_trade(self):
+        """当日成交对账：补写自家委托缺失的分笔，并把外部策略单记为 external"""
+        executor = self._make_live_executor()
+        previous_schema = self._prepare_trade_records_extended_schema(executor)
+        # 自家止盈委托已入账首笔 800 股（推送失效时兜底只记了第一笔）
+        self._seed_trade_record(
+            executor,
+            stock_code="300434", trade_time="2026-10-15 09:32:34", trade_type="SELL",
+            price=13.69, volume=800, amount=10952.0,
+            trade_id="86050103000003602556", strategy="auto_partial",
+            order_id="2014314498", row_status="active",
+        )
+        executor.query_stock_trades = MagicMock(return_value=pd.DataFrame([
+            {"订单编号": "2014314498", "证券代码": "300434", "成交编号": "86050103000003602556",
+             "成交均价": 13.69, "成交数量": 800, "成交金额": 10952.0, "委托类型": 24},
+            {"订单编号": "2014314498", "证券代码": "300434", "成交编号": "86060103000003602810",
+             "成交均价": 13.69, "成交数量": 1500, "成交金额": 20535.0, "委托类型": 24},
+            {"订单编号": "2014314498", "证券代码": "300434", "成交编号": "86070103000003603105",
+             "成交均价": 13.69, "成交数量": 1100, "成交金额": 15059.0, "委托类型": 24},
+            {"订单编号": "2014314498", "证券代码": "300434", "成交编号": "86080103000003603879",
+             "成交均价": 13.69, "成交数量": 200, "成交金额": 2738.0, "委托类型": 24},
+            # 外部策略单（QMT 模型交易，本机没有下单缓存）
+            # 成交时间与 easy_qmt_trader.query_stock_trades 一致：epoch 秒 → naive UTC Timestamp
+            {"订单编号": "2014314499", "证券代码": "002961", "成交编号": "86110106000014193079",
+             "成交均价": 13.94, "成交数量": 100, "成交金额": 1394.0, "委托类型": 23,
+             "成交时间": self._deal_timestamp(9, 50, 5)},
+            {"订单编号": "2014314499", "证券代码": "002961", "成交编号": "86120106000014193081",
+             "成交均价": 13.94, "成交数量": 2200, "成交金额": 30668.0, "委托类型": 23,
+             "成交时间": self._deal_timestamp(9, 50, 5)},
+        ]))
+
+        old_sim = config.ENABLE_SIMULATION_MODE
+        try:
+            config.ENABLE_SIMULATION_MODE = False
+            recorded = executor.reconcile_missing_trades(reason="测试")
+            # 幂等：重复对账不再补写
+            self.assertEqual(executor.reconcile_missing_trades(reason="测试"), 0)
+        finally:
+            config.ENABLE_SIMULATION_MODE = old_sim
+            self._restore_schema_cache(previous_schema)
+
+        self.assertEqual(recorded, 5)
+        own_rows = executor.conn.execute(
+            "SELECT volume, strategy, time_source FROM trade_records "
+            "WHERE order_id='2014314498' ORDER BY volume"
+        ).fetchall()
+        self.assertEqual([r[0] for r in own_rows], [200, 800, 1100, 1500])
+        self.assertEqual({r[1] for r in own_rows}, {"auto_partial"})
+        # 新补写的分笔：成交时间解析不出来时 trade_time 就是补记时刻，
+        # 必须标 reconcile_backfill（种子行 800 股由其他测试写入，不参与断言）
+        new_own_rows = [r for r in own_rows if r[0] != 800]
+        self.assertEqual({r[2] for r in new_own_rows}, {"reconcile_backfill"})
+        external_rows = executor.conn.execute(
+            "SELECT volume, strategy, trade_type, trade_time, time_source FROM trade_records "
+            "WHERE order_id='2014314499' ORDER BY id"
+        ).fetchall()
+        self.assertEqual([r[0] for r in external_rows], [100, 2200])
+        self.assertEqual({r[1] for r in external_rows}, {"external"})
+        self.assertEqual({r[2] for r in external_rows}, {"BUY"})
+        # 成交查询给了时间（pandas.Timestamp）时，落库必须是真实成交时间而非补记时刻
+        self.assertEqual({r[3] for r in external_rows}, {"2026-10-15 09:50:05"})
+        self.assertEqual({r[4] for r in external_rows}, {"exchange"})
+
+    def test_h8_reconcile_skips_order_already_aggregated(self):
+        """网格按委托聚合落一行时，对账不得把同一委托的分笔重复入账"""
+        executor = self._make_live_executor()
+        previous_schema = self._prepare_trade_records_extended_schema(executor)
+        self._seed_trade_record(
+            executor,
+            stock_code="300434", trade_time="2026-10-15 09:32:12", trade_type="SELL",
+            price=13.70, volume=1500, amount=20550.0,
+            trade_id="2014314497", strategy="grid",
+            order_id="2014314497", row_status="active",
+        )
+        executor.query_stock_trades = MagicMock(return_value=pd.DataFrame([
+            {"订单编号": "2014314497", "证券代码": "300434", "成交编号": "86020103000003546071",
+             "成交均价": 13.70, "成交数量": 500, "成交金额": 6850.0, "委托类型": 24},
+            {"订单编号": "2014314497", "证券代码": "300434", "成交编号": "86020103000003546072",
+             "成交均价": 13.70, "成交数量": 1000, "成交金额": 13700.0, "委托类型": 24},
+        ]))
+
+        old_sim = config.ENABLE_SIMULATION_MODE
+        try:
+            config.ENABLE_SIMULATION_MODE = False
+            recorded = executor.reconcile_missing_trades(reason="测试")
+        finally:
+            config.ENABLE_SIMULATION_MODE = old_sim
+            self._restore_schema_cache(previous_schema)
+
+        self.assertEqual(recorded, 0)
+        count = executor.conn.execute("SELECT COUNT(*) FROM trade_records").fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_h9_reconcile_triggers_on_startup_and_new_position_only(self):
+        """对账触发门控：启动后首次全量对一次，之后仅在出现新持仓时再对"""
+        with patch("trading_executor.get_trading_executor") as mock_get_executor:
+            executor = MagicMock()
+            mock_get_executor.return_value = executor
+            positions = pd.DataFrame([{"stock_code": "300434"}, {"stock_code": "300715"}])
+
+            old_sim = config.ENABLE_SIMULATION_MODE
+            try:
+                config.ENABLE_SIMULATION_MODE = False
+                self.pm._trade_reconcile_done = False
+                self.pm._reconciled_stock_codes = set()
+
+                self.pm._maybe_reconcile_missing_trades(positions)
+                self.assertEqual(executor.reconcile_missing_trades.call_count, 1)
+
+                # 持仓没变：不再重复对账
+                self.pm._maybe_reconcile_missing_trades(positions)
+                self.assertEqual(executor.reconcile_missing_trades.call_count, 1)
+
+                # 出现新增持仓（外部买入）：再对一次
+                self.pm._maybe_reconcile_missing_trades(
+                    pd.DataFrame([{"stock_code": "300434"}, {"stock_code": "300715"},
+                                  {"stock_code": "002961"}])
+                )
+                self.assertEqual(executor.reconcile_missing_trades.call_count, 2)
+            finally:
+                config.ENABLE_SIMULATION_MODE = old_sim
+                self.pm._trade_reconcile_done = False
+                self.pm._reconciled_stock_codes = set()
 
     def test_i1_reconnect_does_not_block_forever_when_old_trader_stop_hangs(self):
         """重连清理旧 xttrader 时应有超时保护，不能被 stop() 永久卡住。"""

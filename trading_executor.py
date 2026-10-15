@@ -763,10 +763,17 @@ class TradingExecutor:
             'side_source': 'deal',
         }
 
-    def record_live_deal_after_confirmation(self, deal_info, fallback_order_info=None):
-        """成交回报确认后写 trade_records；网格流水由 GridTradingManager 负责。"""
+    def record_live_deal_after_confirmation(self, deal_info, fallback_order_info=None,
+                                            time_source_override=None):
+        """成交回报确认后写 trade_records；网格流水由 GridTradingManager 负责。
+
+        time_source_override 用于对账补记路径：成交时间解析不出来时 trade_time 就等于
+        补记时刻，必须标 reconcile_backfill，不能让补记时刻冒充交易所成交时间。
+        """
         try:
             record = self._build_trade_record_from_deal(deal_info, fallback_order_info)
+            if time_source_override and record.get('time_source') == settlement_db.TIME_SOURCE_LOCAL:
+                record['time_source'] = time_source_override
             strategy = str(record.get('strategy') or '')
             if strategy == getattr(config, 'GRID_STRATEGY_NAME', 'grid'):
                 return False
@@ -812,16 +819,33 @@ class TradingExecutor:
             return False
 
     def confirm_live_order_filled(self, order_id, fallback_order_info=None, deal_info=None):
-        """根据成交回报或成交查询结果补写实盘交易流水。"""
+        """根据成交回报或成交查询结果补写实盘交易流水。
+
+        一笔委托可能被撮合成多笔成交。此处必须把命中的**全部**成交都写库：
+        推送通道正常时每笔分笔各自回调、不经过本路径；一旦推送失效（成交回报
+        不再送达），本路径就是唯一入口，只写第一笔会永久丢失其余分笔
+        （2026-10-15 实盘: 3600 股的止盈委托只记了首笔 800 股）。
+        """
         if deal_info is not None:
             return self.record_live_deal_after_confirmation(deal_info, fallback_order_info)
 
         try:
             trades = self.query_stock_trades()
-            for trade in self._iter_query_records(trades):
-                trade_order_id = self._field_any(trade, ['order_id', 'm_strOrderID', '订单编号'])
-                if self._same_order_id(trade_order_id, order_id):
-                    return self.record_live_deal_after_confirmation(trade, fallback_order_info)
+            matched = [
+                trade for trade in self._iter_query_records(trades)
+                if self._same_order_id(
+                    self._field_any(trade, ['order_id', 'm_strOrderID', '订单编号']),
+                    order_id
+                )
+            ]
+            if matched:
+                if len(matched) > 1:
+                    logger.info(f"委托号={order_id} 命中 {len(matched)} 笔成交，逐笔补写交易流水")
+                recorded = False
+                for trade in matched:
+                    if self.record_live_deal_after_confirmation(trade, fallback_order_info):
+                        recorded = True
+                return recorded
 
             logger.warning(f"未查询到订单 {order_id} 的成交明细，将使用委托缓存/信号信息补写交易流水")
             fallback_deal = {
@@ -833,6 +857,130 @@ class TradingExecutor:
         except Exception as e:
             logger.error(f"订单成交兜底确认写流水失败: 委托号={order_id}, error={e}")
             return False
+
+    def reconcile_missing_trades(self, reason=''):
+        """用当日成交补齐 trade_records 中缺失的成交（成交流水对账兜底）。
+
+        推送通道失效时成交回报不会送达，本机委托与外部成交都只能在事后补账，
+        否则交割单会缺流水（2026-10-15 实盘: 一笔 3600 股止盈只记了首笔 800 股，
+        另一笔外部策略买入 5700 股完全没有流水）。
+
+        判重以**委托**为单位逐层收敛：
+        - 该委托当日已入库成交量合计 >= 成交查询合计 → 视为已记账，整单跳过。
+          网格路径是按委托聚合落一行的，逐笔比对会把聚合行误判成缺失而重复入账。
+        - 否则按 (成交价, 数量) 做多重集匹配，只补写账上找不到对应行的分笔。
+
+        幂等：重复调用不产生重复流水（上述匹配 + trade_id 唯一约束）。
+        返回本次补写的成交笔数。
+        """
+        if getattr(config, 'ENABLE_SIMULATION_MODE', False):
+            return 0
+
+        try:
+            trades = self.query_stock_trades()
+        except Exception as e:
+            logger.warning(f"[对账] 查询当日成交失败，跳过成交流水对账: {e}")
+            return 0
+
+        fills_by_order = {}
+        for trade in self._iter_query_records(trades):
+            order_id = self._field_any(trade, ['order_id', 'm_strOrderID', '订单编号'])
+            if order_id is None or str(order_id).strip() == '':
+                continue
+            fills_by_order.setdefault(str(order_id).strip(), []).append(trade)
+
+        if not fills_by_order:
+            return 0
+
+        recorded_count = 0
+        for order_id, fills in fills_by_order.items():
+            try:
+                recorded_count += self._backfill_order_fills(order_id, fills)
+            except Exception as e:
+                logger.error(f"[对账] 委托号={order_id} 补写流水失败: {e}")
+
+        if recorded_count:
+            logger.warning(
+                f"[对账] 当日成交核对补写流水 {recorded_count} 笔"
+                f"(触发: {reason or '成交流水对账'})，请核对交割单"
+            )
+        return recorded_count
+
+    def _backfill_order_fills(self, order_id, fills):
+        """补写单笔委托下账上缺失的分笔成交，返回补写笔数。"""
+        rows = self._load_today_order_records(order_id)
+        fallback_order_info = {
+            # 本机委托已入过账时沿用原流水口径，避免把自家成交误标成 external
+            'stock_code': rows[0]['stock_code'] if rows else None,
+            'strategy': (rows[0]['strategy'] or 'external') if rows else 'external',
+            'order_side': rows[0]['trade_type'] if rows else None,
+        }
+        known_trade_ids = {str(row['trade_id']) for row in rows if row.get('trade_id') is not None}
+
+        pending = []
+        for trade in fills:
+            record = self._build_trade_record_from_deal(trade, fallback_order_info)
+            if not record.get('stock_code') or record.get('price', 0) <= 0 or record.get('volume', 0) <= 0:
+                continue
+            pending.append((record, trade))
+
+        if not pending:
+            return 0
+
+        if sum(row['volume'] for row in rows) >= sum(record['volume'] for record, _ in pending):
+            return 0
+
+        # 账上已有的分笔按 (价, 量) 计数抵扣，剩下的才是本次要补的
+        remaining = {}
+        for row in rows:
+            key = (round(row['price'], 4), row['volume'])
+            remaining[key] = remaining.get(key, 0) + 1
+
+        recorded = 0
+        for record, trade in pending:
+            if str(record.get('trade_id')) in known_trade_ids:
+                continue  # 该分笔已在账上，只是成交总量对不上（改了价/量的重写）
+            key = (round(record['price'], 4), record['volume'])
+            if remaining.get(key, 0) > 0:
+                remaining[key] -= 1
+                continue
+            if self.record_live_deal_after_confirmation(
+                    trade,
+                    fallback_order_info,
+                    time_source_override=settlement_db.TIME_SOURCE_RECONCILE):
+                recorded += 1
+        return recorded
+
+    def _load_today_order_records(self, order_id):
+        """读取 trade_records 中该委托当日有效流水，供对账判重。
+
+        读取失败时返回空列表——调用方退化为逐笔补写，trade_id 唯一约束仍是
+        最后一道防线，不会重复入账。
+        """
+        trade_date = datetime.now().strftime('%Y-%m-%d')
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT stock_code, trade_type, price, volume, strategy, trade_id FROM trade_records "
+                "WHERE order_id=? "
+                "AND substr(replace(COALESCE(CAST(trade_time AS TEXT), ''), 'T', ' '), 1, 10)=? "
+                "AND COALESCE(row_status, 'active')='active'",
+                (str(order_id), trade_date)
+            )
+            return [
+                {
+                    'stock_code': row[0],
+                    'trade_type': row[1],
+                    'price': self._to_float(row[2]),
+                    'volume': self._to_int(row[3]),
+                    'strategy': row[4],
+                    'trade_id': row[5],
+                }
+                for row in cursor.fetchall()
+            ]
+        except Exception as e:
+            logger.warning(f"[对账] 读取委托号={order_id} 当日流水失败，按逐笔补写处理: {e}")
+            return []
 
     @staticmethod
     def _normalize_trade_record_stock_code(stock_code):

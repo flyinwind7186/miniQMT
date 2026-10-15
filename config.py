@@ -982,10 +982,14 @@ GRID_PENDING_ORDER_AUTO_REORDER = True  # 网格pending撤单完成后是否自�
 GRID_PENDING_ORDER_REORDER_MAX_ATTEMPTS = 1  # 单笔网格委托最多自动重挂次数
 GRID_PENDING_CANCEL_CONFIRM_TIMEOUT_SECONDS = 60  # 撤单请求提交后等待终态提示阈值（秒）
 
-# 卖出冷却自适应缩短阈值
-# 当触发价比上次成交价高出该比例时，冷却期减半，避免单边上涨行情中错过更高档位
-# 例：上次卖出7.42，当前触发价7.68，涨幅3.5%>2%，冷却期从300s缩短为150s
-GRID_SELL_COOLDOWN_PRICE_THRESHOLD = 0.02  # 2%涨幅触发自适应缩短；0=禁用
+# 卖出冷却价格豁免（自适应缩短）
+# 当触发价比上次成交价高出该比例时，冷却期缩短为 GRID_SELL_COOLDOWN_PRICE_EXEMPT_SECONDS，
+# 避免单边上涨行情中被冷却期挡住合法的新档位卖出。
+# 例：上次卖出7.42，当前触发价7.68，涨幅3.5%>2%，距上次卖出≥30秒即可放行（原为150秒）。
+# 2026-10-15 实盘：网格重建后价格穿越新档位14.25、较上次成交价13.70涨4.4%，
+# 仍被 elapsed≥300//2=150 秒的时间门否决，错失该档位卖出。
+GRID_SELL_COOLDOWN_PRICE_THRESHOLD = 0.02  # 2%涨幅触发价格豁免；0=禁用
+GRID_SELL_COOLDOWN_PRICE_EXEMPT_SECONDS = 30  # 价格豁免的最短间隔(秒)，必须小于 GRID_SELL_COOLDOWN
 
 # 启动条件配置
 GRID_REQUIRE_PROFIT_TRIGGERED = _env_bool("GRID_REQUIRE_PROFIT_TRIGGERED", False)  # 是否要求已触发止盈才能启动网格交易（True=更安全，False=更灵活）

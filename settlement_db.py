@@ -569,8 +569,23 @@ def parse_deal_time(raw, now=None):
                 return None, None
             return epoch, datetime.fromtimestamp(epoch).strftime('%Y-%m-%d %H:%M:%S')
 
+        # 已是 datetime 对象：easy_qmt_trader 的成交查询把 traded_time(epoch 秒)用
+        # pd.to_datetime(unit='s') 转成了 naive Timestamp（基准是 UTC），不接住就会
+        # 退化成"补记时刻"，等于伪造成交时间。pandas 的 naive 时间以 UTC 为基准，
+        # 故优先取 .value（自纪元的纳秒数）；没有 .value 的普通 datetime 才按本地
+        # 时间处理。NaT/无效值用 raw != raw 排除。
+        if isinstance(raw, datetime):
+            if raw != raw:
+                return None, None
+            ns_since_epoch = getattr(raw, 'value', None)
+            epoch = (int(ns_since_epoch) // 1_000_000_000
+                     if ns_since_epoch is not None else int(raw.timestamp()))
+            if epoch < _MIN_PLAUSIBLE_EPOCH:
+                return None, None
+            return epoch, datetime.fromtimestamp(epoch).strftime('%Y-%m-%d %H:%M:%S')
+
         num = int(float(raw))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OSError, OverflowError):
         return None, None
 
     if num <= 0:

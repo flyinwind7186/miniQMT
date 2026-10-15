@@ -3144,14 +3144,20 @@ class GridTradingManager:
                 elapsed = time.time() - last_sell
                 if elapsed < sell_cooldown:
                     price_threshold = getattr(config, 'GRID_SELL_COOLDOWN_PRICE_THRESHOLD', 0.02)
+                    exempt_seconds = getattr(
+                        config, 'GRID_SELL_COOLDOWN_PRICE_EXEMPT_SECONDS', 30)
                     last_sell_price = self.last_sell_prices.get(session.id, 0)
                     adaptive_allowed = (
                         price_threshold > 0 and last_sell_price > 0
                         and trigger_price > last_sell_price * (1 + price_threshold)
-                        and elapsed >= sell_cooldown // 2
+                        and elapsed >= exempt_seconds
                     )
                     if not adaptive_allowed:
-                        logger.warning(f"[网格] {stock_code} 卖出冷却中")
+                        logger.warning(
+                            f"[网格] {stock_code} 卖出冷却中: 已过{elapsed:.0f}秒/冷却{sell_cooldown}秒, "
+                            f"触发价={trigger_price:.2f}, 上次卖出价={last_sell_price:.2f}, "
+                            f"价格豁免需涨幅>{price_threshold:.0%}且间隔≥{exempt_seconds}秒"
+                        )
                         return None
 
             position = position_snapshot if position_snapshot is not None else self.position_manager.get_position(stock_code)
@@ -3629,12 +3635,14 @@ class GridTradingManager:
             last_sell = self.last_sell_times.get(session.id, 0)
             elapsed = time.time() - last_sell
             if elapsed < sell_cooldown:
-                # 自适应缩短：单边上涨行情中触发价明显高于上次成交价时，冷却期减半
+                # 价格豁免：触发价明显高于上次成交价时，冷却期缩短为
+                # GRID_SELL_COOLDOWN_PRICE_EXEMPT_SECONDS（价格连续性优先于时间门）
                 price_threshold = getattr(config, 'GRID_SELL_COOLDOWN_PRICE_THRESHOLD', 0.02)
                 last_sell_price = self.last_sell_prices.get(session.id, 0)
                 if (price_threshold > 0 and last_sell_price > 0
                         and trigger_price > last_sell_price * (1 + price_threshold)):
-                    effective_cooldown = sell_cooldown // 2
+                    effective_cooldown = getattr(
+                        config, 'GRID_SELL_COOLDOWN_PRICE_EXEMPT_SECONDS', 30)
                     if elapsed < effective_cooldown:
                         logger.warning(
                             f"[网格] {stock_code} 卖出冷却中（自适应缩短至{effective_cooldown}秒）"

@@ -207,6 +207,11 @@ class PositionManager:
         self.sync_lock = threading.RLock()  # 可重入锁
         self._deleting_stocks = set()  # 正在删除的股票代码集合
 
+        # 成交流水对账兜底：推送通道失效时成交回报不达，只能靠当日成交查询补账。
+        # 本进程首次成功同步持仓时全量对一次，之后仅在发现新增持仓时再对。
+        self._trade_reconcile_done = False
+        self._reconciled_stock_codes = set()
+
         # 网格交易数据库管理器(用于网格交易会话和记录)
         self._cleared_position_cost_warning_ts = {}
 
@@ -1245,6 +1250,35 @@ class PositionManager:
         self.last_position_update_time = 0
         if reason:
             logger.debug(f"持仓缓存已失效（原因: {reason}）")
+
+    def _maybe_reconcile_missing_trades(self, positions_df):
+        """成交流水对账兜底：本进程首次成功同步持仓时全量对一次，之后仅在出现新持仓时再对。
+
+        外部成交（QMT 客户端策略单/手工单）与推送失效期间的分笔成交都不会实时落库，
+        只有持仓变化会留下痕迹，所以对账挂在持仓同步之后。对账本身只补写缺失成交，
+        幂等，失败不影响监控主循环。
+        """
+        if getattr(config, 'ENABLE_SIMULATION_MODE', False):
+            return
+
+        try:
+            current_codes = set()
+            if positions_df is not None and not positions_df.empty and 'stock_code' in positions_df.columns:
+                current_codes = {str(code) for code in positions_df['stock_code'] if code is not None}
+
+            new_codes = current_codes - self._reconciled_stock_codes
+            if self._trade_reconcile_done and not new_codes:
+                return
+
+            first_run = not self._trade_reconcile_done
+            self._trade_reconcile_done = True
+            self._reconciled_stock_codes |= current_codes
+
+            from trading_executor import get_trading_executor
+            trigger = "启动后首次持仓同步" if first_run else f"新增持仓 {sorted(new_codes)}"
+            get_trading_executor().reconcile_missing_trades(reason=trigger)
+        except Exception as e:
+            logger.warning(f"[对账] 成交流水对账触发失败: {e}")
 
     def get_all_positions(self):
         """获取所有持仓"""
@@ -4955,6 +4989,9 @@ class PositionManager:
                     time.sleep(5)
                     last_loop_time = time.time()
                     continue
+
+                # 成交流水对账兜底：放在信号检测之前，补回的流水先于下一轮策略判断落地
+                self._maybe_reconcile_missing_trades(positions_df)
 
                 # 网格会话巡检：必须放在 positions_df.empty 之前。下面的信号检测按持仓
                 # 列表遍历，已清仓股票的会话永远轮不到，到期/清仓退出会一直触发不了。

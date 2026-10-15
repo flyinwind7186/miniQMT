@@ -84,7 +84,13 @@ class TestHistoryDataSourceRouting(TestBase):
         self.dm.download_history_xtdata.assert_not_called()
 
     def test_standard_mode_uses_mootdx(self):
-        """标准模式应走 Mootdx（调用 Methods.getStockData）"""
+        """标准模式应走 Mootdx（调用 Methods.getStockData）
+
+        标准模式的完整链路是「Tushare 优先 → Mootdx 兜底」，本用例针对兜底段，
+        因此显式让 Tushare 返回空；否则配置了 TUSHARE_TOKEN 的环境里 Tushare
+        会命中并直接返回，Mootdx 根本不会被调用（用例随之假失败）。
+        """
+        self.dm._download_history_tushare = MagicMock(return_value=None)
         with patch.object(config, 'ENABLE_XTQUANT_MANAGER', False), \
              patch('Methods.getStockData', return_value=None) as mock_mootdx:
             self._download()
@@ -142,8 +148,9 @@ class TestHistoryDataSourceRouting(TestBase):
         self.assertIsNotNone(result)
 
     def test_gateway_mode_empty_xtdata_falls_back_to_mootdx(self):
-        """网关模式下 xtdata 返回空时应 fallback 到 Mootdx"""
+        """网关模式下 xtdata 返回空时应 fallback 到 Mootdx（Tushare 同样返回空）"""
         self.dm.download_history_xtdata = MagicMock(return_value=pd.DataFrame())
+        self.dm._download_history_tushare = MagicMock(return_value=None)
         with patch.object(config, 'ENABLE_XTQUANT_MANAGER', True), \
              patch('Methods.getStockData', return_value=None) as mock_mootdx:
             self._download()

@@ -312,6 +312,28 @@ class TradingStrategy:
             logger.error(f"执行 {stock_code} 止损信号时出错: {str(e)}")
             return False
 
+    def _resolve_sell_base_volume(self, stock_code, fallback_volume):
+        """取首次止盈的卖出基准量：优先用执行时刻的实盘可用持仓，失败退回信号快照。
+
+        信号入队到执行之间有数秒延迟，期间同股可能已被网格或其它策略卖出，
+        按检测时刻的快照计算会超卖（详见调用处注释）。
+        """
+        try:
+            self.position_manager.invalidate_positions_cache(reason='首次止盈前重读可卖量')
+            position = self.position_manager.get_position(stock_code)
+            if isinstance(position, dict):
+                available = int(position.get('available') or 0)
+                if available > 0:
+                    return available
+            logger.warning(
+                f"{stock_code} 首次止盈前未读到有效可用持仓，退回信号快照 {fallback_volume} 股"
+            )
+        except Exception as e:
+            logger.warning(
+                f"{stock_code} 首次止盈前重读可用持仓失败，退回信号快照 {fallback_volume} 股: {e}"
+            )
+        return fallback_volume
+
     def _execute_take_profit_half_signal(self, stock_code, signal_info):
         """
         执行首次止盈信号（卖出半仓）
@@ -332,8 +354,12 @@ class TradingStrategy:
             breakout_highest_price = signal_info.get('breakout_highest_price', 0)
             pullback_ratio = signal_info.get('pullback_ratio', 0)
 
-            # 计算卖出数量
-            sell_volume = int(total_volume * sell_ratio / 100) * 100
+            # 计算卖出数量。信号里的 volume 是**检测时刻**的持仓快照，而策略线程单股消费
+            # 周期可达 10+ 秒，其间网格/其他策略可能已卖掉同一只股票——按快照算会超卖
+            # （2026-10-15 实盘：快照 6100 股，执行时可卖只剩 4600 股，"首次止盈卖 60%"
+            # 实际卖成了 84%）。基准量取执行时刻的真实可用持仓，取不到才退回快照。
+            base_volume = self._resolve_sell_base_volume(stock_code, total_volume)
+            sell_volume = int(base_volume * sell_ratio / 100) * 100
             sell_volume = max(sell_volume, 100)  # 至少100股
 
             logger.info(f"执行 {stock_code} 首次止盈，卖出半仓，数量: {sell_volume}, 价格: {current_price:.2f}")

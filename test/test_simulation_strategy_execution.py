@@ -183,14 +183,14 @@ class TestSellSignalSimulation(StrategySimulationTestBase):
         self.assertAlmostEqual(kwargs['sell_price'], 9.0, places=2)
 
     def test_L3_08_take_profit_half_volume_calc(self):
-        """L3-08 半仓止盈卖出数量 = int(total*ratio/100)*100
+        """L3-08 半仓止盈卖出数量 = int(base*ratio/100)*100，base 取执行时刻可用持仓
 
         sell_ratio 的真实取值是 config.INITIAL_TAKE_PROFIT_RATIO_PERCENTAGE
         = 0.6（小数，非百分数），信号由 position_manager.py:2546 产出。
-        1000 股 × 0.6 → int(1000*0.6/100)*100 = 600 股。
+        可卖 1000 股 × 0.6 → int(1000*0.6/100)*100 = 600 股。
         """
         self.mock_pm.get_position.return_value = {
-            'volume': 400, 'available': 400, 'cost_price': 10.0,
+            'volume': 1000, 'available': 1000, 'cost_price': 10.0,
             'current_price': 12.0, 'profit_triggered': True,
         }
         ok = self.strategy._execute_take_profit_half_signal('000001.SZ', {
@@ -204,9 +204,37 @@ class TestSellSignalSimulation(StrategySimulationTestBase):
                          "1000 股按 0.6 比例首次止盈应卖 600 股")
         self.assertEqual(kwargs['sell_type'], 'partial')
 
+    def test_L3_08d_sell_base_uses_live_available_not_signal_snapshot(self):
+        """L3-08d 卖出基准量取执行时刻可用持仓：信号快照过期时不得按快照超卖
+
+        2026-10-15 实盘：信号携带检测时刻快照 6100 股，执行时可卖只剩 4600 股
+        （网格已抢先卖出 1500 股），按快照算卖 3600 股 → 实际卖出 84%（设计意图 60%）。
+        """
+        self.mock_pm.get_position.return_value = {
+            'volume': 4600, 'available': 4600, 'cost_price': 12.93,
+            'current_price': 13.64, 'profit_triggered': False,
+        }
+        self.strategy._execute_take_profit_half_signal('000001.SZ', {
+            'volume': 6100, 'current_price': 13.64, 'sell_ratio': 0.6,
+        })
+
+        _, kwargs = self.mock_pm.simulate_sell_position.call_args
+        self.assertEqual(kwargs['sell_volume'], 2700,
+                         "应按最新可卖 4600 股算 60% = 2700 股，而非按快照 6100 算 3600 股")
+        self.mock_pm.invalidate_positions_cache.assert_called_once()
+
+    def test_L3_08e_sell_base_falls_back_to_snapshot_when_available_unreadable(self):
+        """L3-08e 读不到可用持仓时退回信号快照，不阻断止盈执行"""
+        self.mock_pm.get_position.return_value = None
+        self.strategy._execute_take_profit_half_signal('000001.SZ', {
+            'volume': 1000, 'current_price': 12.0, 'sell_ratio': 0.6,
+        })
+
+        _, kwargs = self.mock_pm.simulate_sell_position.call_args
+        self.assertEqual(kwargs['sell_volume'], 600, "读不到持仓时沿用信号快照口径")
+
     def test_L3_08c_sell_ratio_formula_anchor(self):
-        """L3-08c 锚定 sell_volume 公式：int(total * ratio / 100) * 100"""
-        self.mock_pm.get_position.return_value = {'profit_triggered': True}
+        """L3-08c 锚定 sell_volume 公式：int(base * ratio / 100) * 100"""
         for total, ratio, expected in [
             (1000, 0.6, 600),
             (500, 0.6, 300),
@@ -214,6 +242,10 @@ class TestSellSignalSimulation(StrategySimulationTestBase):
             (350, 0.6, 200),    # int(350*0.6/100)*100 = int(2.1)*100 = 200
         ]:
             with self.subTest(total=total, ratio=ratio):
+                # base 与快照一致，单独锚定比例公式本身
+                self.mock_pm.get_position.return_value = {
+                    'volume': total, 'available': total, 'profit_triggered': True,
+                }
                 self.mock_pm.simulate_sell_position.reset_mock()
                 self.strategy._execute_take_profit_half_signal('000001.SZ', {
                     'volume': total, 'current_price': 12.0, 'sell_ratio': ratio,
@@ -224,7 +256,7 @@ class TestSellSignalSimulation(StrategySimulationTestBase):
     def test_L3_08b_take_profit_half_minimum_100_shares(self):
         """L3-08b 比例极小时仍保证至少卖 100 股"""
         self.mock_pm.get_position.return_value = {
-            'volume': 900, 'available': 900, 'profit_triggered': True,
+            'volume': 100, 'available': 100, 'profit_triggered': True,
         }
         # int(100 * 0.6 / 100) * 100 = 0 → max(0, 100) = 100
         self.strategy._execute_take_profit_half_signal('000001.SZ', {
