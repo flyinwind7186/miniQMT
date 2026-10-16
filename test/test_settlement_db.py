@@ -861,10 +861,11 @@ class TestRecordTrade(SettlementDBTestBase):
         conn.commit()
         conn.close()
         db_migrate.apply_trade_records_extension(self.db, do_backup=False,
-                                                 account_override='25105132')
+                                                 account_override='TEST_SETTLEMENT')
 
     def _record(self, **over):
         rec = {
+            'account': 'TEST_SETTLEMENT',
             'stock_code': '300454', 'stock_name': '深信服',
             'trade_time': '2026-08-04 13:32:34', 'trade_type': 'BUY',
             'price': 122.2, 'volume': 500, 'amount': 61100.0,
@@ -879,7 +880,7 @@ class TestRecordTrade(SettlementDBTestBase):
     def test_inserts_all_new_columns(self):
         self.assertEqual(sdb.record_trade(self._record(), db_path=self.db), 'inserted')
         row = self.query("SELECT * FROM trade_records")[0]
-        self.assertEqual(row['account'], '25105132')
+        self.assertEqual(row['account'], 'TEST_SETTLEMENT')
         self.assertEqual(row['deal_time'], 1789353015)
         self.assertEqual(row['deal_time_str'], '2026-09-14 10:30:15')
         self.assertEqual(row['time_source'], 'exchange')

@@ -2708,6 +2708,11 @@ class GridTradingManager:
             total_amount = pending['filled_amount']
             avg_price = pending['filled_weighted_price_sum'] / total_volume if total_volume > 0 else price
             total_commission = pending.get('filled_total_commission', None)
+            deal_meta = {
+                **self._build_deal_meta_from_trade(trade, order_id, time_source=time_source),
+                'fills': len(confirmed_trade_ids),
+                'fill_ids': ','.join(sorted(confirmed_trade_ids)),
+            }
 
             success = self._record_confirmed_grid_trade_with_order(
                 session=session,
@@ -2723,8 +2728,7 @@ class GridTradingManager:
                     'filled_amount': total_amount
                 },
                 commission=total_commission,
-                deal_meta=self._build_deal_meta_from_trade(trade, order_id,
-                                                           time_source=time_source),
+                deal_meta=deal_meta,
             )
             if not success:
                 # DB 落账失败时回滚 pending 累积量（保留 pending 等待补偿确认重试）

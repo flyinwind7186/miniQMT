@@ -91,6 +91,14 @@ class _FakeOrder:
         self.traded_volume = traded_volume
 
 
+class _ReconcileDateTime(datetime):
+    """固定对账案例的业务日期，并保留 datetime 类型判断和解析能力。"""
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 10, 15, 10, 0, 0, tzinfo=tz)
+
+
 class TestTraderCallback(TestBase):
     """卖出交易 Callback 兜底机制集成测试"""
 
@@ -2681,6 +2689,7 @@ class TestTraderCallback(TestBase):
         self.assertEqual({r[2] for r in rows}, {"auto_partial"})
         self.assertEqual({r[3] for r in rows}, {"SELL"})
 
+    @patch("trading_executor.datetime", _ReconcileDateTime)
     def test_h7_reconcile_backfills_partial_fills_and_external_trade(self):
         """当日成交对账：补写自家委托缺失的分笔，并把外部策略单记为 external"""
         executor = self._make_live_executor()
@@ -2744,6 +2753,7 @@ class TestTraderCallback(TestBase):
         self.assertEqual({r[3] for r in external_rows}, {"2026-10-15 09:50:05"})
         self.assertEqual({r[4] for r in external_rows}, {"exchange"})
 
+    @patch("trading_executor.datetime", _ReconcileDateTime)
     def test_h8_reconcile_skips_order_already_aggregated(self):
         """网格按委托聚合落一行时，对账不得把同一委托的分笔重复入账"""
         executor = self._make_live_executor()

@@ -11,6 +11,7 @@
 import os
 import sys
 import json
+import sqlite3
 import unittest
 from dataclasses import asdict
 from datetime import datetime, timedelta
@@ -19,6 +20,8 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import config
+import db_migrate
+import settlement_db
 from easy_qmt_trader import MyXtQuantTraderCallback, easy_qmt_trader
 from grid_database import DatabaseManager
 from grid_trading_manager import GridSession, GridTradingManager, PriceTracker
@@ -206,6 +209,107 @@ class TestGridLiveOrderConfirmation(unittest.TestCase):
         self.assertEqual(record['volume'], 200)
         self.assertAlmostEqual(record['price'], 10.05, places=4)
         self.assertEqual(record['strategy'], config.GRID_STRATEGY_NAME)
+        self.assertEqual(record['deal_meta']['fills'], 2)
+        self.assertEqual(record['deal_meta']['fill_ids'], 'DEAL_1,DEAL_2')
+
+    def _start_fill_audit_order(self):
+        """仅使用内存库和执行器落账方法，隔离所有真实交易接口。"""
+        config.ENABLE_SIMULATION_MODE = False
+        config.GRID_CONFIRM_LIVE_ORDER_BY_DEAL = True
+        conn = sqlite3.connect(':memory:')
+        conn.row_factory = sqlite3.Row
+        self.addCleanup(conn.close)
+        conn.execute(db_migrate.DDL_TRADE_RECORDS_SIM.replace(
+            'trade_records_sim', 'trade_records'))
+        for _, ddl in db_migrate.TRADE_RECORDS_INDEXES:
+            conn.execute(ddl)
+        schema_patch = patch.dict(settlement_db._SCHEMA_CACHE, {}, clear=True)
+        schema_patch.start()
+        self.addCleanup(schema_patch.stop)
+        account_patch = patch.object(settlement_db, 'get_account_id',
+                                     return_value='TEST_AUDIT')
+        account_patch.start()
+        self.addCleanup(account_patch.stop)
+        executor = TradingExecutor.__new__(TradingExecutor)
+        executor.conn = conn
+        executor.data_manager = Mock()
+        executor.data_manager.get_stock_name.return_value = '测试股票'
+        self.executor._save_trade_record.side_effect = executor._save_trade_record
+        session = self._make_session()
+        signal = self._buy_signal(session)
+        signal['signal_type'] = 'SELL'
+        self.manager.pending_grid_orders['135266305'] = {
+            'session_id': session.id, 'stock_code': session.stock_code,
+            'side': 'SELL', 'signal': signal, 'requested_volume': 1500,
+            'filled_volume': 0, 'filled_amount': 0.0,
+            'confirmed_trade_ids': set(),
+        }
+        self.db.create_grid_order({
+            'order_id': '135266305', 'session_id': session.id,
+            'stock_code': session.stock_code, 'side': 'SELL',
+            'status': 'submitted', 'requested_volume': 1500, 'expected_price': 15.28,
+        })
+        return conn, session
+
+    def _assert_fill_audit_row(self, conn, session, fill_ids):
+        rows = conn.execute('SELECT * FROM trade_records').fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(self.db.get_grid_trades(session.id)), 1)
+        self.assertEqual(session.sell_count, 1)
+        row = rows[0]
+        self.assertEqual(row['trade_id'], '135266305')
+        self.assertEqual(row['order_id'], '135266305')
+        self.assertEqual(row['volume'], 1500)
+        with self.subTest('分笔数'):
+            self.assertEqual(row['fills'], len(fill_ids))
+        with self.subTest('成交编号'):
+            self.assertEqual(row['fill_ids'], ','.join(sorted(fill_ids)))
+        return row
+
+    def test_aggregate_fill_audit_persists_all_ids_and_weighted_price(self):
+        """复现两笔卖出聚合落库，检查审计字段和加权均价。"""
+        conn, session = self._start_fill_audit_order()
+        for volume, price, trade_id in ((400, 15.2, 'DEAL_2'), (1100, 15.3, 'DEAL_1')):
+            self.assertTrue(self.manager.handle_deal_callback(
+                FakeTrade('135266305', volume=volume, price=price, trade_id=trade_id)))
+        row = self._assert_fill_audit_row(conn, session, ['DEAL_2', 'DEAL_1'])
+        self.assertAlmostEqual(row['amount'], 400 * 15.2 + 1100 * 15.3)
+        self.assertAlmostEqual(row['price'], row['amount'] / 1500)
+
+    def test_single_fill_audit_uses_real_deal_id(self):
+        """单笔全成仍使用真实成交编号，不能退回委托号。"""
+        conn, session = self._start_fill_audit_order()
+        self.assertTrue(self.manager.handle_deal_callback(
+            FakeTrade('135266305', volume=1500, price=15.28, trade_id='DEAL_SINGLE')))
+        row = self._assert_fill_audit_row(conn, session, ['DEAL_SINGLE'])
+        self.assertAlmostEqual(row['amount'], 22920.0)
+
+    def test_duplicate_partial_fill_audit_is_not_counted_twice(self):
+        """重复回报不增加分笔数、金额或流水条数。"""
+        conn, session = self._start_fill_audit_order()
+        first = FakeTrade('135266305', volume=400, price=15.2, trade_id='DEAL_2')
+        last = FakeTrade('135266305', volume=1100, price=15.3, trade_id='DEAL_1')
+        self.assertTrue(self.manager.handle_deal_callback(first))
+        self.assertFalse(self.manager.handle_deal_callback(first))
+        self.assertTrue(self.manager.handle_deal_callback(last))
+        self.assertFalse(self.manager.handle_deal_callback(last))
+        row = self._assert_fill_audit_row(conn, session, ['DEAL_2', 'DEAL_1'])
+        self.assertAlmostEqual(row['amount'], 22910.0)
+
+    def test_failed_aggregate_retry_preserves_fill_audit(self):
+        """落账失败后重试，已确认分笔保留，失败的末笔不重复计数。"""
+        conn, session = self._start_fill_audit_order()
+        first = FakeTrade('135266305', volume=400, price=15.2, trade_id='DEAL_2')
+        last = FakeTrade('135266305', volume=1100, price=15.3, trade_id='DEAL_1')
+        self.assertTrue(self.manager.handle_deal_callback(first))
+        with patch.object(self.db, 'record_grid_trade_and_update_session',
+                          side_effect=RuntimeError('模拟落账失败')):
+            self.assertFalse(self.manager.handle_deal_callback(last))
+        self.assertEqual(conn.execute('SELECT COUNT(*) FROM trade_records').fetchone()[0], 0)
+        self.assertEqual(self.manager.pending_grid_orders['135266305']['filled_volume'], 400)
+        self.assertTrue(self.manager.handle_deal_callback(last))
+        row = self._assert_fill_audit_row(conn, session, ['DEAL_2', 'DEAL_1'])
+        self.assertAlmostEqual(row['amount'], 22910.0)
 
     def test_order_cancel_reject_cleans_pending_and_persists_status(self):
         config.ENABLE_SIMULATION_MODE = False
