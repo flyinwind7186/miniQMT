@@ -1223,7 +1223,7 @@
         const unavailable = stock.unavailable_volume == null ? '--' : Number(stock.unavailable_volume).toFixed(0);
         const detail = escapeHtml(stock.restriction_detail || '原因待确认');
         const asof = escapeHtml(stock.position_asof || '待确认');
-        return `${available}<div class="text-xs text-gray-500" title="持仓核对时间：${asof}">不可卖 ${unavailable} · ${detail}</div>`;
+        return `<span title="不可卖 ${unavailable} · ${detail}&#10;持仓核对时间：${asof}">${available}</span>`;
     }
 
     function createStockRow(stock) {
