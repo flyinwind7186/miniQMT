@@ -387,10 +387,13 @@ def load_latest_snapshot(conn, account, start, end):
 def load_equity(conn, account, start, end):
     if not db_migrate.table_exists(conn, 'account_equity_daily'):
         return []
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(account_equity_daily)')}
+    quality = ', '.join(name if name in columns else f'NULL AS {name}' for name in
+                        ('identity_diff', 'validation_status', 'observed_at'))
     return [dict(r) for r in conn.execute(
         "SELECT date, snapshot_type, total_asset, market_value, cash, frozen_cash, "
         "deposit, withdraw, cum_deposit, deposit_source, daily_pnl, "
-        "unexplained_delta, source FROM account_equity_daily "
+        "unexplained_delta, source, " + quality + " FROM account_equity_daily "
         "WHERE account=? AND date>=? AND date<=? ORDER BY date, snapshot_type",
         (account, start, end))]
 
@@ -482,14 +485,17 @@ def write_account_daily(account, equity_rows, path):
         writer.writerow(['account', 'date', 'snapshot_type', 'total_asset',
                          'market_value', 'cash', 'frozen_cash', 'deposit',
                          'withdraw', 'cum_deposit', 'deposit_source',
-                         'daily_pnl', 'unexplained_delta', 'source'])
+                         'daily_pnl', 'unexplained_delta', 'source',
+                         'identity_diff', 'validation_status', 'observed_at'])
         for row in equity_rows:
             writer.writerow([account, row['date'], row['snapshot_type'],
                              row['total_asset'], row['market_value'], row['cash'],
                              row['frozen_cash'], row.get('deposit'),
                              row.get('withdraw'), row.get('cum_deposit'),
                              row.get('deposit_source'), row.get('daily_pnl'),
-                             row.get('unexplained_delta'), row['source']])
+                             row.get('unexplained_delta'), row['source'],
+                             row.get('identity_diff'), row.get('validation_status') or 'unverified',
+                             row.get('observed_at')])
 
 
 def write_cash_flows(account, path):
@@ -849,6 +855,11 @@ def build_report(account, masked, mapping, start, end, merged, raw_rows,
     add(f"             cost_price 列: {'有' if begin_cost_ok else '无（快照无成本价）'}")
     add(f"  期末持仓 : {end_source}（{len(end_rows or [])} 只）")
     add(f"  每日净值 : {'来自 account_equity_daily（' + str(len(equity_rows)) + ' 行）' if equity_rows else '【缺失】'}")
+    pending = sum(row.get('validation_status') == 'pending_review' for row in equity_rows)
+    unverified = sum(row.get('validation_status') in (None, 'unverified') for row in equity_rows)
+    add(f"  净值质量 : 待核对 {pending} 行，未核验 {unverified} 行")
+    if pending:
+        add("             待核对净值的原始资产及校验结果见 account_daily.csv")
     deposited = [r for r in equity_rows if r.get('deposit') or r.get('withdraw')]
     add(f"  出入金   : cash_flows {cash_flow_count} 行"
         f"{'；净值表 ' + str(len(deposited)) + ' 天有记录' if deposited else '；QMT 无出入金接口，需券商对账单导入'}")

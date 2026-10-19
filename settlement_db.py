@@ -298,6 +298,39 @@ def write_equity_snapshot(position_manager, snapshot_type,
                   db_path=db_path)
         return False
 
+    observed_at = recorded_at
+    diff = None if None in (total_asset, market_value, cash) else (
+        total_asset - cash - (frozen_cash or 0.0) - market_value)
+    observations = []
+    for _ in range(_cfg('SETTLEMENT_ASSET_RECHECK_COUNT', 1)):
+        if diff is None or abs(diff) <= identity_tolerance:
+            break
+        observations.append(dict(total_asset=total_asset, market_value=market_value,
+                                 cash=cash, frozen_cash=frozen_cash, observed_at=observed_at))
+        time.sleep(_cfg('SETTLEMENT_ASSET_RECHECK_DELAY_SECONDS', 0.2))
+        try:
+            candidate = position_manager.get_account_info() or {}
+            values = tuple(_num(candidate.get(key)) for key in
+                           ('total_asset', 'market_value', 'available', 'frozen_cash'))
+            if (None in values[:3] or values[0] <= 0
+                    or _is_blank_asset(*values)
+                    or _is_partial_asset(*values, identity_tolerance)):
+                continue
+            total_asset, market_value, cash, frozen_cash = values
+            observed_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            diff = total_asset - cash - (frozen_cash or 0.0) - market_value
+        except Exception as e:
+            logger.debug(f"净值复查失败，保留上次有效读数: {e}")
+    validation_status = ('unverified' if diff is None else
+                         'valid' if abs(diff) <= identity_tolerance else 'pending_review')
+    if observations:
+        observations.append(dict(total_asset=total_asset, market_value=market_value,
+                                 cash=cash, frozen_cash=frozen_cash, observed_at=observed_at))
+        log_event('asset_identity_recheck', 'INFO',
+                  {'snapshot_type': snapshot_type, 'date': snapshot_date,
+                   'observations': observations, 'validation_status': validation_status},
+                  db_path=db_path)
+
     # 恒等式校验：差额说明账户里还有别的资产项（逆回购/理财/未交收资金），
     # 归因时必须排除，否则"亏损"里会混进非股票损益。
     #
@@ -327,10 +360,12 @@ def write_equity_snapshot(position_manager, snapshot_type,
                 "INSERT OR REPLACE INTO account_equity_daily("
                 "account, date, snapshot_type, total_asset, market_value, cash, "
                 "frozen_cash, deposit, withdraw, cum_deposit, deposit_source, "
-                "daily_pnl, unexplained_delta, source, recorded_at) "
-                "VALUES (?,?,?,?,?,?,?,NULL,NULL,NULL,NULL,?,?,?,?)",
+                "daily_pnl, unexplained_delta, source, recorded_at, "
+                "identity_diff, validation_status, observed_at) "
+                "VALUES (?,?,?,?,?,?,?,NULL,NULL,NULL,NULL,?,?,?,?,?,?,?)",
                 (account, snapshot_date, snapshot_type, total_asset, market_value,
-                 cash, frozen_cash, daily_pnl, unexplained, source, recorded_at))
+                 cash, frozen_cash, daily_pnl, unexplained, source, recorded_at,
+                 diff, validation_status, observed_at))
             conn.commit()
         finally:
             conn.close()

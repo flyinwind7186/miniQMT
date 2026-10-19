@@ -843,7 +843,8 @@ class TradingStrategy:
                                 result = self.execute_trading_signal_direct(stock_code, signal_type, signal_info)
                                 if result == self.SIGNAL_EXECUTION_SUCCESS:
                                     self.position_manager.mark_signal_processed(stock_code)
-                                    logger.warning(f"✅ {stock_code} 止损信号执行成功，跳过其他策略")
+                                    status = '模拟成交完成' if config.ENABLE_SIMULATION_MODE else '委托已提交，等待成交确认'
+                                    logger.warning(f"✅ {stock_code} 止损{status}，跳过其他策略")
                                     return  # 止损执行后直接返回
                                 elif result == self.SIGNAL_EXECUTION_BLOCKED:
                                     logger.debug(f"{stock_code} 止损信号被委托/同步状态阻断，保留信号等待自动重试")

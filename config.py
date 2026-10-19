@@ -489,6 +489,7 @@ DYNAMIC_SIGNAL_MAX_AGE_SECONDS = 120     # 执行前信号最大年龄(秒)，�
 
 # 🔑 委托单超时管理配置
 ENABLE_PENDING_ORDER_AUTO_CANCEL = True  # 是否启用委托单超时自动撤单
+PENDING_ORDER_CHECK_INTERVAL_SECONDS = 3.0  # 本地委托超时扫描间隔，与持仓监控周期对齐
 PENDING_ORDER_TIMEOUT_MINUTES = 5        # 委托单超时时间（分钟），默认5分钟
 STOP_LOSS_PENDING_ORDER_TIMEOUT_MINUTES = 0.5  # 止损委托单超时时间（分钟），30秒后触发撤单流程
 TAKE_PROFIT_PENDING_ORDER_TIMEOUT_MINUTES = 0.5  # 止盈委托单超时时间（分钟），与止损对齐为30秒
@@ -620,6 +621,7 @@ WEB_TRADE_RECORDS_DISPLAY_DAYS = 60  # 下单日志仅展示最近N天（约2个
 # ======================= 日志清理配置 =======================
 LOG_CLEANUP_DAYS = 30  # 保留最近30天的日志
 LOG_CLEANUP_TIME = "00:00:00"  # 每天凌晨执行清理
+LOG_CLEANUP_CHECK_INTERVAL = 60  # 到点后每天清理一次，允许错过指定分钟
 
 # ======================= 数据库维护配置 =======================
 DB_MAINTENANCE_TIME = "00:10:00"  # 每天非交易时段执行维护
@@ -686,6 +688,8 @@ SETTLEMENT_SNAPSHOT_HEALTH_LOOKBACK = 7      # 快照完整性回溯天数
 # 恒等式 total_asset = cash + frozen_cash + market_value 的容差（元）。
 # 差额说明账户含非股票资产项（逆回购/理财/未交收资金），归因时必须排除。
 SETTLEMENT_ASSET_IDENTITY_TOLERANCE = 1.0
+SETTLEMENT_ASSET_RECHECK_COUNT = 1  # 净值恒等式异常时最多额外查询一次
+SETTLEMENT_ASSET_RECHECK_DELAY_SECONDS = 0.2  # 等待 QMT 估值字段同步
 # 资产跳变告警阈值：超过 max(总资产*比例, 绝对值) 即告警。
 # QMT 无任何出入金查询接口，跳变无法区分盈亏与银证转账，只能标记待人工判断。
 SETTLEMENT_ASSET_JUMP_RATIO = 0.02

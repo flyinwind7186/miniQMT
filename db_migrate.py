@@ -175,9 +175,19 @@ CREATE TABLE IF NOT EXISTS account_equity_daily (
     unexplained_delta REAL,
     source TEXT,
     recorded_at TEXT,
+    identity_diff REAL,
+    validation_status TEXT DEFAULT 'unverified',
+    observed_at TEXT,
     PRIMARY KEY (account, date, snapshot_type)
 )
 '''
+
+# 旧记录没有采集质量证据，迁移后保持未核验。
+EQUITY_QUALITY_COLUMNS = [
+    ('identity_diff', 'REAL'),
+    ('validation_status', "TEXT DEFAULT 'unverified'"),
+    ('observed_at', 'TEXT'),
+]
 
 # 模拟成交独立表：模拟单不得与实盘同表（否则归因时极易污染）。
 # 列结构与 trade_records 完全一致，便于同一套 SQL 复用。
@@ -517,6 +527,8 @@ def migrate_settlement_schema(db_path=None, do_backup=True, dry_run=False):
             if not existed:
                 created.append(table)
                 logger.info(f"DB迁移: 已创建表 {table}")
+
+        ensure_columns(conn, 'account_equity_daily', EQUITY_QUALITY_COLUMNS)
 
         for _, index_ddl in INDEXES + BROKER_INDEXES:
             conn.execute(index_ddl)

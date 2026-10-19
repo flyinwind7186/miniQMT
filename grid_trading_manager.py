@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import config
 import settlement_db
 from logger import get_logger
+from order_utils import classify_position_restriction, position_quantities
 
 logger = get_logger(__name__)
 
@@ -224,6 +225,7 @@ class PriceTracker:
     direction: Optional[str] = None
     crossed_level: Optional[float] = None
     waiting_callback: bool = False
+    sell_restriction: Optional[tuple] = None  # 当前卖出受限状态，仅变化时通知
 
     def update_price(self, new_price: float):
         """更新价格并追踪峰谷值"""
@@ -1898,7 +1900,8 @@ class GridTradingManager:
         logger.debug(f"[网格] _check_exit_conditions: 未触发任何退出条件")
         return None
 
-    def _check_level_crossing(self, session: GridSession, tracker: PriceTracker, price: float):
+    def _check_level_crossing(self, session: GridSession, tracker: PriceTracker, price: float,
+                              allow_sell: bool = True):
         """检查是否穿越档位"""
         levels = session.get_grid_levels()
         logger.debug(f"[网格] _check_level_crossing: session_id={session.id}, stock_code={session.stock_code}, "
@@ -1906,7 +1909,7 @@ class GridTradingManager:
                     f"waiting_callback={tracker.waiting_callback}")
 
         # 检查上穿(卖出档位)
-        if price > levels['upper'] and not tracker.waiting_callback:
+        if allow_sell and price > levels['upper'] and not tracker.waiting_callback:
             logger.debug(f"[网格] _check_level_crossing: 检测到上穿卖出档位 price={price:.2f} > upper={levels['upper']:.2f}")
             # 检查冷却
             if self._is_level_in_cooldown(session.id, levels['upper']):
@@ -1992,6 +1995,19 @@ class GridTradingManager:
             position_lookup_failed = True
             logger.warning(f"[网格] 锁外预取持仓失败(本轮跳过清仓退出判断): {e}")
 
+        quantities = position_quantities(position_snapshot or {})
+        sell_restricted = quantities is None or quantities[1] <= 0
+        restriction = classify_position_restriction(position_snapshot or {}, fresh=False)
+        if sell_restricted:
+            get_restriction = getattr(self.position_manager, 'get_position_restriction', None)
+            if callable(get_restriction):
+                try:
+                    info = get_restriction(stock_code, position_snapshot or {})
+                    if isinstance(info, dict):
+                        restriction = info
+                except Exception as e:
+                    logger.debug(f"[网格] 持仓受限原因待确认: {e}")
+
         with self.lock:
             session = self.sessions.get(self._normalize_code(stock_code))
             if not session:
@@ -2031,10 +2047,25 @@ class GridTradingManager:
                 logger.warning(f"[网格] session_id={session.id} 无对应的PriceTracker, 返回None")
                 return None
 
+            if sell_restricted:
+                state = (datetime.now().date(), quantities, restriction.get('restriction_reason'))
+                if tracker.sell_restriction != state:
+                    notify = logger.warning if restriction.get('restriction_reason') == 'unknown' else logger.info
+                    notify(f"[网格] {stock_code} 卖出受限，等待可卖数量恢复，"
+                           f"原因={restriction.get('restriction_detail', '持仓数量待确认')}")
+                    tracker.sell_restriction = state
+                if tracker.direction == 'rising':
+                    tracker.reset(current_price)
+            elif tracker.sell_restriction is not None:
+                tracker.sell_restriction = None
+                if tracker.direction != 'falling':
+                    tracker.reset(current_price)
+                logger.info(f"[网格] {stock_code} 可卖数量已恢复，重新评估当前价格")
+
             tracker.update_price(current_price)
 
             # 3. 检查是否穿越新档位
-            self._check_level_crossing(session, tracker, current_price)
+            self._check_level_crossing(session, tracker, current_price, allow_sell=not sell_restricted)
 
             # 4. 检查回调触发
             signal_type = tracker.check_callback(session.callback_ratio)

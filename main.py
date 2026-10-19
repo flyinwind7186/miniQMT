@@ -6,6 +6,9 @@ import time
 import threading
 import signal
 import sys
+import hashlib
+import json
+from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime
 
@@ -84,6 +87,24 @@ def _get_existing_position_manager():
     return getattr(position_manager_module, "_instance", None)
 
 
+@lru_cache(maxsize=1)
+def _get_code_version():
+    """启动后固定版本及源码摘要，便于区分同一发布版本的不同部署。"""
+    root = os.path.dirname(os.path.abspath(__file__))
+    try:
+        with open(os.path.join(root, 'release_version.json'), encoding='utf-8') as handle:
+            version = json.load(handle).get('releaseVersion', 'N/A')
+        digest = hashlib.sha256()
+        for name in sorted(os.listdir(root)):
+            if name.endswith('.py'):
+                digest.update(name.encode('utf-8'))
+                with open(os.path.join(root, name), 'rb') as handle:
+                    digest.update(handle.read())
+        return version, digest.hexdigest()[:12]
+    except (OSError, ValueError):
+        return 'N/A', 'N/A'
+
+
 def _get_runtime_identity(position_manager=None):
     """返回当前进程身份信息，清理阶段不得因取值失败影响退出。"""
     try:
@@ -105,11 +126,14 @@ def _get_runtime_identity(position_manager=None):
     except Exception:
         session_id = "N/A"
 
+    release_version, code_id = _get_code_version()
     return {
         "pid": os.getpid(),
         "account_id": account_id or "未配置",
         "port": getattr(config, "WEB_SERVER_PORT", "N/A"),
         "session_id": session_id,
+        "release_version": release_version,
+        "code_id": code_id,
     }
 
 
@@ -119,7 +143,9 @@ def _format_runtime_identity(identity=None):
         f"pid={identity['pid']} "
         f"account_id={identity['account_id']} "
         f"port={identity['port']} "
-        f"session_id={identity['session_id']}"
+        f"session_id={identity['session_id']} "
+        f"version={identity.get('release_version', 'N/A')} "
+        f"code_id={identity.get('code_id', 'N/A')}"
     )
 
 
@@ -389,6 +415,10 @@ def heartbeat_logger():
                 restricted = positions[positions['unavailable_volume'].fillna(0) > 0]
                 logger.info(f"   受限持仓:{len(restricted)}只 | 不可卖数量:{int(restricted['unavailable_volume'].sum())}股")
             logger.info(_format_resource_line())
+            sync_status = position_manager.get_sync_status()
+            logger.info(f"   持久化: 最近成功距今={sync_status['age_seconds']}秒，"
+                        f"最近同步耗时={sync_status['duration_seconds']}秒，"
+                        f"最近委托超时处理延迟={position_manager.last_order_timeout_delay_seconds:.2f}秒")
             logger.info(f"   {market_health_str}")
             logger.info("=" * 50)
 

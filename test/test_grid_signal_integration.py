@@ -45,6 +45,7 @@ class TestGridSignalIntegration(unittest.TestCase):
         self.position_manager.get_position.return_value = {
             'stock_code': '000001.SZ',
             'volume': 1000,
+            'available': 1000,
             'current_price': 10.0
         }
 

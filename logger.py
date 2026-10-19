@@ -375,19 +375,21 @@ def schedule_log_cleanup():
     if not config.ENABLE_LOG_CLEANUP:
         return
 
+    last_cleanup_date = None
     while True:
         # 获取当前时间
         now = datetime.now()
         cleanup_time = datetime.strptime(config.LOG_CLEANUP_TIME, "%H:%M:%S").time()
 
-        # 如果当前时间是清理时间，执行清理
-        if now.time().hour == cleanup_time.hour and now.time().minute == cleanup_time.minute:
-            clean_old_logs()
-            # 等待60秒，避免在同一分钟内多次执行
-            time.sleep(60)
-        else:
-            # 等待10分钟检查一次
-            time.sleep(600)
+        # 启动较晚或错过指定分钟时补执行，成功后当天不再重复。
+        if now.time() >= cleanup_time and last_cleanup_date != now.date():
+            try:
+                clean_old_logs()
+                last_cleanup_date = now.date()
+            except Exception as e:
+                log_throttled(logger, logging.WARNING, 'log_cleanup_failed',
+                              f"日志清理失败，下一轮重试: {e}")
+        time.sleep(config.LOG_CLEANUP_CHECK_INTERVAL)
 
 # ============ 第三方库输出抑制工具 ============
 

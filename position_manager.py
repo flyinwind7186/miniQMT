@@ -183,6 +183,9 @@ class PositionManager:
         self.version_increment_interval = config.VERSION_INCREMENT_INTERVAL if hasattr(config, 'VERSION_INCREMENT_INTERVAL') else 15  # 默认15秒
 
         # 定时同步线程
+        self._memory_sync_lock = threading.RLock()
+        self._sync_last_success_time = None
+        self._sync_duration_seconds = None
         self.sync_thread = None
         self.sync_stop_flag = False
         self.start_sync_thread()
@@ -194,8 +197,9 @@ class PositionManager:
         # 🔑 新增：委托单跟踪管理
         self.pending_orders_lock = threading.Lock()
         self.pending_orders = {}  # 存储待处理的委托单: {stock_code: {'order_id', 'submit_time', 'signal_type', ...}}
-        self.order_check_interval = 30  # 委托单检查间隔（秒）
+        self.order_check_interval = config.PENDING_ORDER_CHECK_INTERVAL_SECONDS
         self.last_order_check_time = 0
+        self.last_order_timeout_delay_seconds = 0.0
         self.callback_refresh_lock = threading.Lock()
         self.last_callback_refresh_time = 0
         self.callback_refresh_min_interval = 2.0
@@ -964,6 +968,10 @@ class PositionManager:
 
     def _sync_memory_to_db(self):
         """将内存数据库数据同步到数据库"""
+        # Timer 重试和定时同步共用一把锁，避免并发事务与重试状态互相覆盖。
+        sync_lock = self.__dict__.setdefault('_memory_sync_lock', threading.RLock())
+        sync_lock.acquire()
+        started = time.monotonic()
         self._sync_last_error = None
         try:
             # 添加模拟交易模式检查，模拟模式下不同步到SQLite
@@ -1118,19 +1126,34 @@ class PositionManager:
                         logger.debug(f"SQLite同步: 更新{update_count}条持仓数据")
 
             except Exception as e:
-                logger.error(f"独立连接同步失败: {str(e)}")
                 sync_db_conn.rollback()
                 raise
             finally:
                 sync_db_conn.close()
 
+            self._sync_last_success_time = time.time()
+            self._sync_retry_count = 0
+
         except Exception as e:
-            logger.error(f"内存数据库数据同步到数据库时出错: {str(e)}")
+            log_throttled(logger, logging.ERROR, f"position_sync_failed:{config.DB_PATH}",
+                          f"内存数据库同步失败: {e}")
             # 记录失败原因，供 _retry_sync 判定成败。
             # 本函数吞掉异常不外抛，调用方无法靠 try/except 感知失败，
             # 必须通过该标志传递，否则重试会把失败误判为成功。
             self._sync_last_error = e
             self._schedule_sync_retry()
+        finally:
+            self._sync_duration_seconds = time.monotonic() - started
+            sync_lock.release()
+
+    def get_sync_status(self):
+        """返回持久化最近成功时间和单轮耗时，不触发数据库访问。"""
+        sync_lock = self.__dict__.setdefault('_memory_sync_lock', threading.RLock())
+        with sync_lock:
+            last_success = getattr(self, '_sync_last_success_time', None)
+            return {'last_success_time': last_success,
+                    'age_seconds': None if last_success is None else max(0, time.time() - last_success),
+                    'duration_seconds': getattr(self, '_sync_duration_seconds', None)}
 
     def _schedule_sync_retry(self):
         """安排一次同步重试，受重试上限约束。
@@ -1159,20 +1182,22 @@ class PositionManager:
 
     def _retry_sync(self):
         """重试同步"""
-        logger.info("执行同步重试")
-        self._sync_last_error = None
-        try:
-            self._sync_memory_to_db()
-        except Exception as e:
-            # _sync_memory_to_db 正常情况下自己吞异常，这里兜底未预期的外抛
-            self._sync_last_error = e
+        sync_lock = self.__dict__.setdefault('_memory_sync_lock', threading.RLock())
+        with sync_lock:
+            logger.info("执行同步重试")
+            self._sync_last_error = None
+            try:
+                self._sync_memory_to_db()
+            except Exception as e:
+                # _sync_memory_to_db 正常情况下自己吞异常，这里兜底未预期的外抛
+                self._sync_last_error = e
 
-        if self._sync_last_error is None:
-            self._sync_retry_count = 0
-            logger.info("同步重试成功")
-        else:
-            logger.error(f"同步重试失败: {self._sync_last_error}")
-            # 失败不清零计数器，由 _sync_memory_to_db 内的排程继续推进直至上限
+            if self._sync_last_error is None:
+                self._sync_retry_count = 0
+                logger.info("同步重试成功")
+            else:
+                logger.error(f"同步重试失败: {self._sync_last_error}")
+                # 失败不清零计数器，由 _sync_memory_to_db 内的排程继续推进直至上限
 
     def start_sync_thread(self):
         """启动定时同步线程"""
@@ -1196,11 +1221,6 @@ class PositionManager:
             try:
                 # 原有的数据库同步
                 self._sync_memory_to_db()
-
-                # 定时同步成功则重置重试计数器，使重试上限按"每次故障"计数，
-                # 而不是进程生命周期内累计（否则达上限后永远不再重试）
-                if getattr(self, '_sync_last_error', None) is None:
-                    self._sync_retry_count = 0
 
                 # 新增：每1分钟执行一次全量刷新
                 current_time = time.time()
@@ -5615,6 +5635,8 @@ class PositionManager:
 
                     # 检查是否超时
                     if elapsed_minutes >= timeout_minutes:
+                        self.last_order_timeout_delay_seconds = max(
+                            0.0, (elapsed_minutes - timeout_minutes) * 60)
                         timeout_info = dict(order_info)
                         timeout_info['timeout_minutes'] = timeout_minutes
                         timeout_info['elapsed_minutes'] = elapsed_minutes

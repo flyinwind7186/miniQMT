@@ -202,7 +202,8 @@
         "test.test_trade_time_windows",
         "test.test_trade_calendar",
         "test.test_runtime_logging",
-        "test.test_runtime_log_regression"
+        "test.test_runtime_log_regression",
+        "test.test_runtime_optimization"
       ],
       "priority": "critical"
     },
@@ -399,7 +400,8 @@
         "test.test_data_pipeline_e2e",
         "test.test_launcher_menu_pages",
         "test.test_positions_cache_invalidation",
-        "test.test_snapshot_freshness"
+        "test.test_snapshot_freshness",
+        "test.test_runtime_optimization"
       ],
       "priority": "critical"
     },
