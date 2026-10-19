@@ -82,6 +82,7 @@ class TestGridValidationEdgeCases(unittest.TestCase):
         # 准备持仓数据
         self.position_mgr.positions[stock_code] = {
             'volume': 1000,
+            'available': 1000,
             'cost_price': 10.0,
             'current_price': 11.0,
             'highest_price': 11.5,
@@ -150,6 +151,7 @@ class TestGridValidationEdgeCases(unittest.TestCase):
         # 持仓仅50股（不足一手）
         self.position_mgr.positions[stock_code] = {
             'volume': 50,
+            'available': 50,
             'cost_price': 10.0,
             'current_price': 11.0,
             'highest_price': 11.5,
@@ -189,6 +191,7 @@ class TestGridValidationEdgeCases(unittest.TestCase):
 
         self.position_mgr.positions[stock_code] = {
             'volume': 1000,
+            'available': 1000,
             'cost_price': 10.0,
             'current_price': 10.5,
             'highest_price': 11.0,
@@ -265,6 +268,7 @@ class TestGridValidationEdgeCases(unittest.TestCase):
 
         self.position_mgr.positions[stock_code] = {
             'volume': 1000,
+            'available': 1000,
             'cost_price': 10.0,
             'current_price': 11.0,
             'highest_price': 11.5,
@@ -325,6 +329,7 @@ class TestGridValidationEdgeCases(unittest.TestCase):
         # 大持仓（100000股）
         self.position_mgr.positions[stock_code] = {
             'volume': 100000,
+            'available': 100000,
             'cost_price': 10.0,
             'current_price': 11.5,
             'highest_price': 11.5,

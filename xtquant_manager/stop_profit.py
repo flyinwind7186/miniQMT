@@ -20,8 +20,12 @@ from __future__ import annotations
 
 import threading
 import time
+import math
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+from config import STOCK_TRADE_LOT_SIZE, is_continuous_trade_time
+from order_utils import ACTIVE_ORDER_STATUS, ORDER_TYPE_SELL, calculate_sell_volume, position_quantities
 
 try:
     from logger import get_logger
@@ -105,6 +109,8 @@ class StopProfitMonitor:
         self._cfg = cfg or StopProfitConfig()
         self._states: Dict[str, Dict[str, PositionState]] = {}  # account_id -> {stock_code -> state}
         self._signal_history: Dict[str, float] = {}  # f"{account_id}:{stock_code}:{signal_type}" -> timestamp
+        self._pending_signals = {}
+        self._restriction_states = {}
         self._lock = threading.RLock()
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -196,7 +202,15 @@ class StopProfitMonitor:
             return
 
         # 查询持仓
-        positions = account.query_positions()
+        positions = account.query_positions(strict=True)
+        if positions is None:
+            return
+        self._confirm_pending_signals(acc_id, account, positions)
+        held_codes = {str(p.get('证券代码', ''))[:6] for p in positions}
+        with self._lock:
+            for code in list(self._states.get(acc_id, {})):
+                if code[:6] not in held_codes:
+                    self._states[acc_id].pop(code, None)
         if not positions:
             return
 
@@ -262,26 +276,28 @@ class StopProfitMonitor:
                 self._states[acc_id][stock_code] = state
 
         # ——— 价格有效性 ———
+        fresh_price = current_price > 0
         if current_price <= 0:
-            # 使用上次缓存价格
-            if state.last_price > 0 and (time.time() - state.last_price_time) < cfg.price_staleness_seconds:
+            # 每轮优先查询新价格，不能靠反复使用缓存来延长旧价格寿命。
+            try:
+                tick = account.get_full_tick([stock_code])
+                if tick and stock_code in tick:
+                    lp = tick[stock_code].get("lastPrice", 0)
+                    if lp and float(lp) > 0:
+                        current_price = float(lp)
+                        fresh_price = True
+            except Exception:
+                pass
+            if (current_price <= 0 and state.last_price > 0
+                    and 0 <= time.time() - state.last_price_time < cfg.price_staleness_seconds):
                 current_price = state.last_price
-            else:
-                # 尝试通过 tick 获取
-                try:
-                    tick = account.get_full_tick([stock_code])
-                    if tick and stock_code in tick:
-                        lp = tick[stock_code].get("lastPrice", 0)
-                        if lp and float(lp) > 0:
-                            current_price = float(lp)
-                except Exception:
-                    pass
             if current_price <= 0:
                 return  # 无法获取有效价格，跳过
 
         # 更新最近价格
         state.last_price = current_price
-        state.last_price_time = time.time()
+        if fresh_price:
+            state.last_price_time = time.time()
 
         # ——— 更新最高价 ———
         if current_price > state.highest_price or state.highest_price <= 0:
@@ -289,7 +305,24 @@ class StopProfitMonitor:
 
         # ——— 1) 止损检查（最高优先级） ———
         signal = self._check_stop_loss(stock_code, cost_price, current_price, available, state, cfg)
+        restriction = (str(pos.get('restriction_reason', 'unknown')), volume - available,
+                       bool(signal), datetime.now().date())
+        restriction_key = (acc_id, stock_code)
+        with self._lock:
+            previous = self._restriction_states.get(restriction_key)
+            self._restriction_states[restriction_key] = restriction
+        if restriction != previous and available < volume:
+            message = (f"[{stock_code}] 可卖={available}，不可卖={volume - available}，"
+                       f"原因={pos.get('restriction_detail', '待确认')}")
+            if signal:
+                logger.warning(f"{message}；已触发止损，继续监控并仅处理可卖部分")
+            else:
+                logger.info(message)
+        elif restriction != previous and previous and previous[1] > 0 and available == volume:
+            logger.info(f"[{stock_code}] 可卖数量已恢复，重新评估当前交易条件")
         if signal:
+            if available <= 0:
+                return
             self._emit_signal(acc_id, account, stock_code, "stop_loss", signal)
             return
 
@@ -324,10 +357,6 @@ class StopProfitMonitor:
             expected = abs(cfg.stop_loss_ratio)
             if loss_ratio >= expected * 0.5:
                 reason = "stop_loss_1" if state.profit_triggered else "stop_loss_0"
-                logger.warning(
-                    f"[{stock_code}] 触发止损: price={current_price:.2f} "
-                    f"stop={stop_loss_price:.2f} reason={reason}"
-                )
                 return {
                     "current_price": current_price,
                     "stop_loss_price": stop_loss_price,
@@ -462,26 +491,42 @@ class StopProfitMonitor:
         with self._lock:
             cfg = self._cfg
         key = self._signal_key(acc_id, stock_code, signal_type)
-        if self._is_duplicate(key, cfg.signal_dedup_seconds):
-            logger.debug(f"[{stock_code}] {signal_type} 信号在去重窗口内，跳过")
+        if not cfg.enabled or not is_continuous_trade_time():
             return
-        self._signal_history[key] = time.time()
-
-        # 执行卖出
-        volume = info.get("volume", 0)
-        if signal_type == "take_profit_half":
-            sell_ratio = info.get("sell_ratio", 0.6)
-            sell_volume = max(100, int(volume * sell_ratio + 0.5))  # 至少 100 股
-        else:
-            sell_volume = volume  # 全仓
-
+        snapshot = position_quantities({'volume': info.get('volume'), 'available': info.get('volume')})
+        if snapshot is None or snapshot[1] <= 0:
+            return
+        try:
+            positions = account.query_positions(strict=True)
+            position = next((p for p in positions or []
+                             if str(p.get('证券代码', ''))[:6] == stock_code[:6]), None)
+            quantities = position_quantities(position)
+            orders = account.query_orders(strict=True)
+        except Exception as e:
+            logger.warning(f"[{stock_code}] 卖出前持仓或委托查询失败: {e}")
+            return
+        if quantities is None or quantities[1] <= 0 or orders is None:
+            return
+        if any(str(o.get('证券代码', ''))[:6] == stock_code[:6]
+               and o.get('委托类型') == ORDER_TYPE_SELL
+               and o.get('委托状态') in ACTIVE_ORDER_STATUS for o in orders):
+            return
+        ratio = info.get('sell_ratio', cfg.initial_take_profit_sell_ratio) if signal_type == 'take_profit_half' else 1
+        sell_volume = calculate_sell_volume(quantities[1], ratio, lot_size=STOCK_TRADE_LOT_SIZE)
         if sell_volume <= 0:
             return
 
         current_price = info.get("current_price", 0)
-        if current_price <= 0:
+        if not isinstance(current_price, (int, float)) or not math.isfinite(current_price) or current_price <= 0:
             return
 
+        pending_key = (acc_id, stock_code[:6])
+        with self._lock:
+            if pending_key in self._pending_signals or self._is_duplicate(key, cfg.signal_dedup_seconds):
+                return
+            reservation = {'order_id': None, 'signal_type': signal_type, 'stock_code': stock_code,
+                           'trade_date': datetime.now().date()}
+            self._pending_signals[pending_key] = reservation
         try:
             # xtquant order_type: 24=限价卖出, price_type: 11=固定价
             order_id = account.order_stock(
@@ -494,26 +539,60 @@ class StopProfitMonitor:
                 order_remark=f"auto {signal_type}",
             )
             if order_id > 0:
+                with self._lock:
+                    reservation['order_id'] = order_id
+                    self._signal_history[key] = time.time()
                 logger.warning(
                     f"[{stock_code}] {signal_type} 卖出已提交: "
                     f"volume={sell_volume} price={current_price:.2f} order_id={order_id}"
                 )
-                # 更新状态
-                if signal_type == "take_profit_half":
-                    with self._lock:
-                        state = self._states.get(acc_id, {}).get(stock_code)
-                        if state:
-                            state.profit_triggered = True
-                elif signal_type == "take_profit_full":
-                    with self._lock:
-                        state = self._states.get(acc_id, {}).get(stock_code)
-                        if state:
-                            state.profit_triggered = True
-                            state.highest_price = 0.0  # 重置
+                # 委托受理不代表成交，状态由后续委托查询确认。
             else:
                 logger.error(f"[{stock_code}] {signal_type} 下单失败 (order_id={order_id})")
         except Exception as e:
             logger.error(f"[{stock_code}] {signal_type} 执行异常: {e}")
+        finally:
+            with self._lock:
+                if reservation['order_id'] is None:
+                    self._pending_signals.pop(pending_key, None)
+
+    def _confirm_pending_signals(self, acc_id, account, positions=None):
+        """利用已有委托查询确认成交，未成交不推进首次止盈状态。"""
+        with self._lock:
+            pending = [(k, dict(v)) for k, v in self._pending_signals.items()
+                       if k[0] == acc_id and v['order_id'] is not None]
+        if not pending:
+            return
+        orders = account.query_orders(strict=True)
+        if orders is None:
+            return
+        for key, info in pending:
+            order = next((o for o in orders if str(o.get('订单编号')) == str(info['order_id'])), None)
+            if order is None:
+                # 日内委托跨日不再出现在当日列表时，先确认新持仓及无同股在途单，
+                # 再释放旧意图；新一轮仍须重新取得价格、验证交易条件。
+                if (positions is not None and is_continuous_trade_time()
+                        and info.get('trade_date') != datetime.now().date()
+                        and not any(str(o.get('证券代码', ''))[:6] == key[1]
+                                    and o.get('委托状态') in ACTIVE_ORDER_STATUS for o in orders)):
+                    current = next((p for p in positions if str(p.get('证券代码', ''))[:6] == key[1]), None)
+                    if current is None or position_quantities(current) is not None:
+                        with self._lock:
+                            self._pending_signals.pop(key, None)
+                            self._signal_history.pop(self._signal_key(acc_id, info['stock_code'], info['signal_type']), None)
+                        logger.warning(f"[{info['stock_code']}] 跨日委托未取得旧终态，已按新持仓释放旧意图，重新判断")
+                continue
+            status = order.get('委托状态')
+            filled = int(order.get('成交数量') or 0)
+            has_fill = filled > 0 or status == 56
+            with self._lock:
+                state = self._states.get(acc_id, {}).get(info['stock_code'])
+                if state and has_fill and info['signal_type'] == 'take_profit_half':
+                    state.profit_triggered = True
+                if status in (53, 54, 56, 57):
+                    self._pending_signals.pop(key, None)
+                    if not has_fill:
+                        self._signal_history.pop(self._signal_key(acc_id, info['stock_code'], info['signal_type']), None)
 
     # ==================================================================
     # 手动卖出（供 API 调用）

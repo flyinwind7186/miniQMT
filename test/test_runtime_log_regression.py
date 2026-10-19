@@ -98,6 +98,7 @@ class TestDynamicSignalNotificationRegression(unittest.TestCase):
              patch.object(config, "ENABLE_AUTO_TRADING", True), \
              patch.object(pm, "_is_stop_profit_enabled", return_value=True), \
              patch.object(pm, "_has_tracked_pending_order", return_value=False), \
+             patch.object(pm, "get_position", return_value=None), \
              patch.object(pm, "check_trading_signals") as detect, \
              patch("position_manager.logger.info") as notify:
             for price in (9.0, 8.9, 8.8):

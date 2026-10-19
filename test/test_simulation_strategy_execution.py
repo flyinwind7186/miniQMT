@@ -221,17 +221,16 @@ class TestSellSignalSimulation(StrategySimulationTestBase):
         _, kwargs = self.mock_pm.simulate_sell_position.call_args
         self.assertEqual(kwargs['sell_volume'], 2700,
                          "应按最新可卖 4600 股算 60% = 2700 股，而非按快照 6100 算 3600 股")
-        self.mock_pm.invalidate_positions_cache.assert_called_once()
+        self.mock_pm._invalidate_positions_cache.assert_called_once()
 
-    def test_L3_08e_sell_base_falls_back_to_snapshot_when_available_unreadable(self):
-        """L3-08e 读不到可用持仓时退回信号快照，不阻断止盈执行"""
+    def test_L3_08e_sell_base_blocks_when_available_unreadable(self):
+        """L3-08e 读不到可用持仓时阻断，不以旧信号量冒充当前可卖量。"""
         self.mock_pm.get_position.return_value = None
-        self.strategy._execute_take_profit_half_signal('000001.SZ', {
+        result = self.strategy._execute_take_profit_half_signal('000001.SZ', {
             'volume': 1000, 'current_price': 12.0, 'sell_ratio': 0.6,
         })
-
-        _, kwargs = self.mock_pm.simulate_sell_position.call_args
-        self.assertEqual(kwargs['sell_volume'], 600, "读不到持仓时沿用信号快照口径")
+        self.assertIsNone(result)
+        self.mock_pm.simulate_sell_position.assert_not_called()
 
     def test_L3_08c_sell_ratio_formula_anchor(self):
         """L3-08c 锚定 sell_volume 公式：int(base * ratio / 100) * 100"""
@@ -274,15 +273,17 @@ class TestSellSignalSimulation(StrategySimulationTestBase):
         signal = {'volume': 1000, 'current_price': 12.0, 'sell_ratio': 0.6}
 
         # 已标记 → 验证成功
-        self.mock_pm.get_position.return_value = {
-            'volume': 500, 'profit_triggered': True}
+        self.mock_pm.get_position.side_effect = [
+            {'volume': 1000, 'available': 1000},
+            {'volume': 500, 'available': 500, 'profit_triggered': True}]
         self.assertTrue(
             self.strategy._execute_take_profit_half_signal('000001.SZ', signal),
             "profit_triggered=True 应返回 True")
 
         # 未标记 → 验证失败
-        self.mock_pm.get_position.return_value = {
-            'volume': 500, 'profit_triggered': False}
+        self.mock_pm.get_position.side_effect = [
+            {'volume': 1000, 'available': 1000},
+            {'volume': 500, 'available': 500, 'profit_triggered': False}]
         self.assertFalse(
             self.strategy._execute_take_profit_half_signal('000001.SZ', signal),
             "profit_triggered=False 应返回 False（状态异常）")
@@ -297,7 +298,7 @@ class TestSellSignalSimulation(StrategySimulationTestBase):
         self.assertTrue(ok)
         _, kwargs = self.mock_pm.simulate_sell_position.call_args
         self.assertEqual(kwargs['sell_type'], 'full')
-        self.assertEqual(kwargs['sell_volume'], 600)
+        self.assertEqual(kwargs['sell_volume'], 1000, '全仓止盈按最新可卖量执行，旧信号为600股')
 
     def test_L3_10_sell_failure_propagates(self):
         """L3-10 simulate_sell_position 返回 False 时三分支均透传 False"""

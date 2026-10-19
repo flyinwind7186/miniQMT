@@ -60,6 +60,7 @@ class MockPositionManager:
             'stock_code': stock_code,
             'volume': self._volume,
             'can_use_volume': self._volume,
+            'available': self._volume,
             'cost_price': self._cost_price,
             'current_price': self._cost_price,
             'market_value': self._cost_price * self._volume,

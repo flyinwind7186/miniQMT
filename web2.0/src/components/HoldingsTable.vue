@@ -92,6 +92,14 @@ function shortName(pos: any): string {
   return pos.stock_name || pos.stock_code
 }
 
+function restrictionText(pos: any): string {
+  return `不可卖 ${pos.unavailable_volume ?? '--'} · ${pos.restriction_detail || '原因待确认'}`
+}
+
+function positionTime(pos: any): string {
+  return `持仓核对时间：${pos.position_asof?.replace('T', ' ') || '待确认'}`
+}
+
 const age = computed(() => formatAge(positions.positionsUpdatedAt))
 </script>
 
@@ -166,6 +174,9 @@ const age = computed(() => formatAge(positions.positionsUpdatedAt))
           <span>可用 <strong class="font-mono text-slate-700">{{ pos.available }}</strong></span>
           <span>市值 <strong class="font-mono text-slate-700">{{ fmtMoney(pos.market_value, 0) }}</strong></span>
         </div>
+        <div class="mt-2 text-[10px] text-slate-500" :title="positionTime(pos)">
+          {{ restrictionText(pos) }}
+        </div>
       </article>
     </div>
 
@@ -224,6 +235,10 @@ const age = computed(() => formatAge(positions.positionsUpdatedAt))
                 <span v-if="pos.stop_profit_enabled === false" class="badge-slate !text-[9px] !px-1.5" title="该股动态止盈止损已暂停（在 web1.0 中切换）">关</span>
                 <span v-else-if="pos.stop_profit_enabled === true" class="badge-green !text-[9px] !px-1.5" title="该股动态止盈止损已开启">开</span>
                 <span v-else class="text-slate-300" title="后端未提供该字段">--</span>
+              </span>
+              <span v-else-if="col.k === 'available'" :title="positionTime(pos)">
+                {{ cellValue(pos, col) }}
+                <span class="block text-[10px] text-slate-500">{{ restrictionText(pos) }}</span>
               </span>
               <span v-else-if="col.k === 'stock_name'" class="inline-flex min-w-0 max-w-full items-center gap-1.5">
                 <span class="min-w-0 truncate">{{ cellValue(pos, col) }}</span>

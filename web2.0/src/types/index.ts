@@ -4,6 +4,10 @@ export interface Position {
   stock_name?: string
   volume: number
   available: number
+  unavailable_volume?: number | null
+  restriction_reason?: 'none' | 't1' | 'sell_order' | 'mixed' | 'unknown' | null
+  restriction_detail?: string | null
+  position_asof?: string | null
   cost_price: number
   current_price: number
   market_value: number

@@ -896,6 +896,7 @@ class TestClient(unittest.TestCase):
         _, kwargs = mock_req.post.call_args
         self.assertEqual(kwargs["json"], {"strategy": "custom_stock", "quantity": 1, "stocks": ["600000"]})
         self.assertEqual(kwargs["headers"].get("X-API-Token"), "tok")
+        self.assertEqual(kwargs["headers"].get("X-Automatic-Trade"), "1")
 
     @patch("autobuy.client.requests")
     def test_buy_failure(self, mock_req):

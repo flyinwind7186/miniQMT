@@ -10,6 +10,7 @@ XtQuantAccount — 单账号封装
 import random
 import threading
 import time
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -21,6 +22,8 @@ from .exceptions import (
 )
 from .metrics import MetricsCollector
 from .timeout import call_with_timeout
+from order_utils import classify_position_restriction
+from config import QMT_POSITION_QUERY_INTERVAL
 
 try:
     from logger import get_logger
@@ -89,6 +92,7 @@ class XtQuantAccount:
         self._reconnect_attempts = 0
         self._last_ping_ok_time: Optional[float] = None
         self._connected_at: Optional[float] = None
+        self._restriction_evidence = (0.0, None, None)
 
         # 外部成交回调列表
         self._trade_callbacks: List[Any] = []
@@ -550,21 +554,34 @@ class XtQuantAccount:
         )
         return result if result is not None else -1
 
-    def query_positions(self) -> List[dict]:
+    def query_positions(self, strict=False) -> Optional[List[dict]]:
         """
         查询持仓，返回 list[dict]（与 easy_qmt_trader.position() 的行数据兼容）。
-        失败返回空列表。
+        兼容模式失败返回空列表；strict=True 时失败返回 None，与成功空仓区分。
         """
         if not self._check_trader():
-            return []
+            return None if strict else []
         positions = self._call(
             self._xt_trader.query_stock_positions,
             self._acc,
             op="query_positions",
-            default=[],
+            default=None if strict else [],
         )
+        if positions is None:
+            return None if strict else []
         if not positions:
             return []
+        query_time = time.time()
+        with self._conn_lock:
+            evidence_time, orders, trades = self._restriction_evidence
+        if (not 0 <= query_time - evidence_time < QMT_POSITION_QUERY_INTERVAL
+                or datetime.fromtimestamp(evidence_time).date() != datetime.now().date()):
+            orders = self._call(self._xt_trader.query_stock_orders, self._acc,
+                                op='restriction_orders', default=None)
+            trades = self._call(self._xt_trader.query_stock_trades, self._acc,
+                                op='restriction_trades', default=None)
+            with self._conn_lock:
+                self._restriction_evidence = (query_time, orders, trades)
         result = []
         for pos in positions:
             stock_name = (
@@ -593,6 +610,10 @@ class XtQuantAccount:
                 "当日买入": None,
                 "当日卖出": None,
             })
+        for position in result:
+            position.update(classify_position_restriction(
+                position, orders=orders, trades=trades,
+                position_asof=datetime.fromtimestamp(query_time).isoformat(timespec='seconds')))
         return result
 
     def query_asset(self) -> dict:
@@ -616,16 +637,18 @@ class XtQuantAccount:
             "总资产": asset.total_asset,
         }
 
-    def query_orders(self) -> List[dict]:
-        """查询当日委托，失败返回空列表"""
+    def query_orders(self, strict=False) -> Optional[List[dict]]:
+        """查询当日委托；strict=True 时失败返回 None，兼容模式返回空列表。"""
         if not self._check_trader():
-            return []
+            return None if strict else []
         orders = self._call(
             self._xt_trader.query_stock_orders,
             self._acc,
             op="query_orders",
-            default=[],
+            default=None if strict else [],
         )
+        if orders is None:
+            return None if strict else []
         if not orders:
             return []
         result = []

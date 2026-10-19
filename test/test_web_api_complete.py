@@ -1018,6 +1018,23 @@ class TestStockPool(WebAPITestBase):
 class TestTradeExecution(WebAPITestBase):
     """测试交易执行接口"""
 
+    def test_automatic_buy_cannot_bypass_restricted_stop_loss_through_manual_api(self):
+        payload = {'strategy': 'custom_stock', 'quantity': 1, 'stocks': ['000001.SZ']}
+        with patch.object(config, 'ENABLE_DYNAMIC_STOP_PROFIT', True), \
+             patch.object(mock_pm, 'get_position', return_value={
+                 'volume': 1000, 'available': 0, 'cost_price': 10, 'current_price': 9}), \
+             patch.object(mock_data_manager, 'get_latest_data', return_value={'lastPrice': 9}), \
+             patch.object(mock_strategy, 'manual_buy', return_value='TEST_ORDER') as submit:
+            automatic = self.client.post('/api/actions/execute_buy', json=payload,
+                                         headers={'X-Automatic-Trade': '1'})
+            self.assertEqual(automatic.status_code, 200)
+            self.assertEqual(automatic.get_json()['success_count'], 0)
+            self.assertEqual(len(automatic.get_json()['blocked_stocks']), 1)
+            submit.assert_not_called()
+            manual = self.client.post('/api/actions/execute_buy', json=payload)
+            self.assertEqual(manual.get_json()['success_count'], 1)
+            submit.assert_called_once()
+
     def test_01_execute_buy_missing_quantity(self):
         """POST /api/actions/execute_buy quantity=0 应返回 400"""
         resp, ms = self._post(

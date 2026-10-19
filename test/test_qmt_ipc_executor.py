@@ -11,7 +11,16 @@ sys.path.insert(0, os.path.join(_ROOT, "qmt-trader"))
 _MODULE_TMP = tempfile.mkdtemp(prefix="ipc_exec_module_")
 os.environ["QMT_IPC_ROOT"] = _MODULE_TMP
 
-import QMT_trade_executor as ex
+# 测试显式调用 main/handle_account，导入时不能另启守护线程争用同一状态和锁。
+_original_top_level_worker = os.environ.get('QMT_IPC_TOP_LEVEL_WORKER')
+os.environ['QMT_IPC_TOP_LEVEL_WORKER'] = '0'
+try:
+    import QMT_trade_executor as ex
+finally:
+    if _original_top_level_worker is None:
+        os.environ.pop('QMT_IPC_TOP_LEVEL_WORKER', None)
+    else:
+        os.environ['QMT_IPC_TOP_LEVEL_WORKER'] = _original_top_level_worker
 ex.DIR_LOG = os.path.join(_MODULE_TMP, "qmt_log")
 os.makedirs(ex.DIR_LOG, exist_ok=True)
 

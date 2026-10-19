@@ -218,6 +218,21 @@ class XtQuantClient:
             return positions  # 无 pandas 时退化为 list[dict]
         return _to_df(positions, _POSITION_COLUMNS)
 
+    def check_stock_is_av_sell(self, stock='128036', amount=10):
+        """使用网关最新持仓核实可卖量，查询失败或缺字段时拒绝卖出。"""
+        from order_utils import position_quantities
+        try:
+            positions = self.position()
+            if hasattr(positions, 'to_dict'):
+                positions = positions.to_dict('records')
+            for position in positions or []:
+                if str(position.get('证券代码', ''))[:6] == str(stock)[:6]:
+                    quantities = position_quantities(position)
+                    return quantities is not None and amount > 0 and quantities[1] >= amount
+        except Exception as e:
+            logger.warning(f"卖出前持仓查询失败: {e}")
+        return False
+
     def balance(self):
         """
         查询账户资产，兼容 easy_qmt_trader.balance()。

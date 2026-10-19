@@ -15,6 +15,7 @@ import json
 import config
 import settlement_db
 from logger import get_logger, log_throttled, reset_log_throttle
+from order_utils import classify_position_restriction, position_quantities
 from data_manager import get_data_manager
 from easy_qmt_trader import easy_qmt_trader
 from timeout_utils import run_with_timeout
@@ -158,6 +159,8 @@ class PositionManager:
         self.last_position_update_time = 0
         self.position_update_interval = config.QMT_POSITION_QUERY_INTERVAL  # ⭐ 优化: 使用配置10秒
         self.positions_cache = None
+        self._position_restrictions = {}
+        self._restriction_log_states = {}
         self.empty_real_position_count = 0
 
         # 新增，持仓数据版本控制
@@ -1363,6 +1366,8 @@ class PositionManager:
 
                     # 原子赋值：CPython STORE_ATTR 是单字节码操作，确保其他线程
                     # 读到的 self.positions_cache 始终是完整对象
+                    self._update_position_restrictions(new_cache, real_positions_df,
+                                                       position_query_valid, current_time)
                     self.positions_cache = new_cache
                     self.last_position_update_time = current_time
                     logger.debug(f"更新持仓缓存，共 {len(self.positions_cache)} 条记录")
@@ -1457,7 +1462,11 @@ class PositionManager:
                 'profit_breakout_triggered': 'profit_breakout_triggered',
                 'breakout_highest_price': 'breakout_highest_price',
                 'stop_profit_enabled': 'stop_profit_enabled',
-                'last_update': 'last_update'
+                'last_update': 'last_update',
+                'unavailable_volume': 'unavailable_volume',
+                'restriction_reason': 'restriction_reason',
+                'restriction_detail': 'restriction_detail',
+                'position_asof': 'position_asof'
             }
             
             # 🔑 构建标准化的持仓字典
@@ -1628,6 +1637,7 @@ class PositionManager:
                             self.memory_conn.commit()
             
             logger.debug(f"获取 {stock_code} 持仓成功: 数量={position_dict.get('volume', 0)}, 成本价={position_dict.get('cost_price', 0):.2f}")
+            position_dict.update(self.get_position_restriction(stock_code, position_dict))
             return position_dict
             
         except Exception as e:
@@ -1638,6 +1648,79 @@ class PositionManager:
         """判断是否为测试环境"""
         # 可以根据需要修改判断逻辑
         return 'unittest' in sys.modules
+
+    def _update_position_restrictions(self, frame, raw_positions, valid, query_time):
+        """每次持仓同步批量取得证据，Web 和逐股检测复用结果。"""
+        orders = trades = None
+        if valid and not raw_positions.empty:
+            try:
+                orders = self.qmt_trader.query_stock_orders()
+            except Exception as e:
+                logger.debug(f"受限原因的委托证据不可用: {e}")
+            try:
+                trades = self.qmt_trader.query_stock_trades()
+            except Exception as e:
+                logger.debug(f"受限原因的成交证据不可用: {e}")
+        raw = {str(r.get('证券代码', ''))[:6]: r for r in raw_positions.to_dict('records')}
+        metadata = {}
+        asof = datetime.fromtimestamp(query_time).isoformat(timespec='seconds')
+        for position in frame.to_dict('records'):
+            code = str(position['stock_code'])[:6]
+            source = raw.get(code)
+            reliable = valid and position_quantities(source) == position_quantities(position)
+            reliable = reliable and position_quantities(source) is not None
+            proof_position = dict(position, account_id=source.get('资金账号') if source else None)
+            info = classify_position_restriction(proof_position, trades=trades, orders=orders,
+                                                  position_asof=asof if reliable else None, fresh=reliable)
+            metadata[code] = dict(info, quantities=position_quantities(position))
+        with self.memory_conn_lock:
+            self._position_restrictions = metadata
+        for key in ('unavailable_volume', 'restriction_reason', 'restriction_detail', 'position_asof'):
+            frame[key] = [metadata[str(code)[:6]][key] for code in frame.get('stock_code', [])]
+        if metadata:
+            self._increment_data_version()
+
+    def get_position_restriction(self, stock_code, position):
+        """返回持仓受限状态；旧库、旧快照和字段不足一律保留待确认。"""
+        if config.ENABLE_SIMULATION_MODE:
+            return classify_position_restriction(position)
+        with self.memory_conn_lock:
+            info = dict(getattr(self, '_position_restrictions', {}).get(str(stock_code)[:6], {}))
+        asof = info.get('position_asof')
+        fresh = False
+        if asof and info.get('quantities') == position_quantities(position):
+            timestamp = datetime.fromisoformat(asof)
+            age = (datetime.now() - timestamp).total_seconds()
+            fresh = (timestamp.date() == datetime.now().date()
+                     and 0 <= age <= config.QMT_POSITION_QUERY_INTERVAL + config.MONITOR_CALL_TIMEOUT)
+        if not fresh:
+            return classify_position_restriction(position, position_asof=asof, fresh=False)
+        return {key: value for key, value in info.items() if key != 'quantities'}
+
+    def _notify_position_restriction(self, stock_code, position, stop_loss=False):
+        """仅在受限数量、原因或止损状态改变时通知，正常冻结不刷故障告警。"""
+        quantities = position_quantities(position)
+        if quantities is None:
+            return
+        info = self.get_position_restriction(stock_code, position)
+        state = (datetime.now().date(), quantities, info['restriction_reason'], stop_loss)
+        with self.signal_lock:
+            previous = self._restriction_log_states.get(stock_code)
+            self._restriction_log_states[stock_code] = state
+        if state == previous:
+            return
+        volume, available = quantities
+        if volume > available:
+            message = (f"[持仓受限] {stock_code} 可卖={available}，不可卖={volume - available}，"
+                       f"原因={info['restriction_detail']}")
+            if stop_loss:
+                logger.warning(f"{message}；已触发止损，继续监控并仅处理可卖部分")
+            elif info['restriction_reason'] == 'unknown':
+                logger.warning(message)
+            else:
+                logger.info(message)
+        elif previous and previous[1][0] > previous[1][1]:
+            logger.info(f"[持仓受限] {stock_code} 可卖数量已恢复，重新评估当前交易条件")
 
     def _update_stock_positions_file(self, current_positions):
         """
@@ -2053,6 +2136,20 @@ class PositionManager:
 
     def get_data_version_info(self):
         """获取持仓数据版本信息"""
+        expired = False
+        if not config.ENABLE_SIMULATION_MODE:
+            with self.memory_conn_lock:
+                for info in getattr(self, '_position_restrictions', {}).values():
+                    if not info.get('position_asof') or info.get('restriction_detail') == '持仓数据待刷新':
+                        continue
+                    timestamp = datetime.fromisoformat(info['position_asof'])
+                    age = (datetime.now() - timestamp).total_seconds()
+                    if (timestamp.date() != datetime.now().date()
+                            or not 0 <= age <= config.QMT_POSITION_QUERY_INTERVAL + config.MONITOR_CALL_TIMEOUT):
+                        info.update(restriction_reason='unknown', restriction_detail='持仓数据待刷新')
+                        expired = True
+            if expired:
+                self._increment_data_version()
         with self.version_lock:
             return {
                 'version': self.data_version,
@@ -2726,7 +2823,7 @@ class PositionManager:
                         # 因此按股票节流，避免持仓被冻结时刷屏（2026-09-09 曾刷出 1513 行）。
                         if profit_triggered:
                             log_throttled(
-                                logger, logging.WARNING,
+                                logger, logging.WARNING if available > 0 else logging.DEBUG,
                                 f"stop_loss_detect:{stock_code}",
                                 f"⚠️ {stock_code} 首次止盈后回落触发止损保护，当前价格: {current_price:.2f}, "
                                 f"止损价格: {stop_loss_price:.2f}"
@@ -2734,7 +2831,7 @@ class PositionManager:
                             reason = 'stop_loss_1'
                         else:
                             log_throttled(
-                                logger, logging.WARNING,
+                                logger, logging.WARNING if available > 0 else logging.DEBUG,
                                 f"stop_loss_detect:{stock_code}",
                                 f"{stock_code} 触发固定止损，当前价格: {current_price:.2f}, "
                                 f"止损价格: {stop_loss_price:.2f}"
@@ -2806,7 +2903,7 @@ class PositionManager:
                                 return None, None
 
                             if available <= 0:
-                                logger.warning(
+                                logger.debug(
                                     f"{stock_code} 已满足回撤止盈但当前可卖数量为0，暂不生成半仓止盈信号 "
                                     f"(volume={volume}, available={available})"
                                 )
@@ -2831,9 +2928,9 @@ class PositionManager:
             
             # 7. 动态止盈检查（已触发首次止盈后）
             if profit_triggered and highest_price > 0:
-                # P0修复: available=0时说明已有委托在途，跳过信号生成避免无限循环
+                # 无可卖股份时跳过执行信号，受限原因由统一状态通知说明。
                 if available <= 0:
-                    logger.debug(f"{stock_code} take_profit_full: available={available}，已有委托在途，跳过信号生成")
+                    logger.debug(f"{stock_code} take_profit_full: available={available}，暂不可卖，继续监控")
                     return None, None
 
                 # 🔑 使用安全计算的动态止盈价格
@@ -2944,41 +3041,26 @@ class PositionManager:
                     )
                     return _result(False, "blocked", "pending_order")
 
-                # 检查是否有未成交委托单 (全仓止盈也纳入，除非显式允许跳过)
-                position = self.get_position(stock_code)
-                if position:
-                    available = int(position.get('available', 0))
-                    volume = int(position.get('volume', 0))
-
-                    # 如果available=0但volume>0，可能有未成交委托单
-                    if available == 0 and volume > 0:
-                        # 修复后的查询机制：使用标准化股票代码匹配
-                        if self._has_pending_orders(stock_code):
-                            log_throttled(
-                                logger, logging.WARNING,
-                                f"pending_order_block:{stock_code}",
-                                f"[待委托拦截] {stock_code} available=0（总持仓{volume}），"
-                                f"存在未成交委托单，跳过本次信号执行；成交或撤销后自动重试"
-                            )
-                            return _result(False, "blocked", "pending_order")
-                        else:
-                            # available=0 且查不到活跃委托：多为 T+1 冻结或持仓同步延迟。
-                            # 保守拒绝，避免重复提交委托；信号保留，条件恢复后自动重试。
-                            # 该状态每轮轮询都会命中，故按股票节流，只保留首次与周期汇总。
-                            log_throttled(
-                                logger, logging.WARNING,
-                                f"available_zero_block:{stock_code}",
-                                f"[信号阻断] {stock_code} available=0（总持仓{volume}）且无活跃委托，"
-                                f"判定为T+1冻结或持仓同步延迟，暂不执行；恢复后自动重试，"
-                                f"若持续出现请人工确认持仓状态"
-                            )
-                            return _result(False, "blocked", "available_zero_sync_delay")
             else:
                 # 全仓止盈信号: 允许跳过活跃委托单检查（受配置控制）
                 logger.warning(
                     f"全仓止盈信号 {stock_code}: 允许跳过活跃委托单检查 "
                     f"(ALLOW_TAKE_PROFIT_FULL_WITH_PENDING=True)"
                 )
+
+            # 跳过委托检查的配置不能跳过可卖数量上限。
+            position = self.get_position(stock_code)
+            if position:
+                quantities = position_quantities(position)
+                if quantities is None:
+                    return _result(False, 'blocked', 'position_quantity_unknown')
+                if quantities[0] > 0 and quantities[1] == 0:
+                    restriction = self.get_position_restriction(stock_code, position)
+                    if restriction['restriction_reason'] == 't1':
+                        return _result(False, 'blocked', 't1_locked')
+                    log_throttled(logger, logging.WARNING, f"available_zero_block:{stock_code}",
+                                  f"[信号阻断] {stock_code} 当前无可卖股份，原因={restriction['restriction_detail']}")
+                    return _result(False, 'blocked', 'available_zero_sync_delay')
 
             if signal_type == 'stop_loss':
                 current_price = signal_info.get('current_price', 0)
@@ -4023,7 +4105,7 @@ class PositionManager:
             commission, _ = settlement_db.estimate_trade_cost(sell_amount, 'SELL')
             revenue = sell_amount - commission
             
-            if sell_type == 'full' or sell_volume >= current_volume:
+            if sell_volume >= current_volume:
                 # 全仓卖出，从内存数据库删除持仓记录
                 success = self._simulate_remove_position(stock_code)
                 if success:
@@ -4618,6 +4700,9 @@ class PositionManager:
                 df['change_percentage'] = df['stock_code'].map(change_percentages)
             
             logger.debug(f"获取到 {len(df)} 条持仓记录（所有字段），并计算了涨跌幅")
+            for index, row in df.iterrows():
+                for key, value in self.get_position_restriction(row['stock_code'], row.to_dict()).items():
+                    df.at[index, key] = value
             return df
         except Exception as e:
             logger.error(f"获取所有持仓信息（所有字段）时出错: {str(e)}")
@@ -4780,6 +4865,15 @@ class PositionManager:
                 return None
 
             signal_type, signal_info = self.check_trading_signals(stock_code, current_price)
+            position = self.get_position(stock_code)
+            if isinstance(position, dict):
+                self._notify_position_restriction(stock_code, position, signal_type == 'stop_loss')
+            if signal_type and signal_info.get('volume') == 0:
+                with self.signal_lock:
+                    stale = self.latest_signals.get(stock_code)
+                    if stale and not str(stale.get('type', '')).startswith('grid_'):
+                        self.latest_signals.pop(stock_code, None)
+                return None
             with self.signal_lock:
                 if signal_type:
                     previous = self.latest_signals.get(stock_code)
@@ -5348,7 +5442,7 @@ class PositionManager:
             ) or {}
             if result.get('paused'):
                 logger.info(
-                    f"[网格] {stock_code} {reason} 已成交(清仓)，已暂停该股网格会话 "
+                    f"[网格] {stock_code} {reason} 可卖部分已成交，已暂停该股网格会话，剩余持仓以券商同步为准 "
                     f"(session_id={result.get('session_id')})"
                 )
         except Exception as e:

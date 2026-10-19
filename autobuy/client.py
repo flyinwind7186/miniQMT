@@ -22,7 +22,7 @@ class WebClient:
         self.timeout = cfg.timeout
 
     def _headers(self) -> dict:
-        h = {"Content-Type": "application/json"}
+        h = {"Content-Type": "application/json", "X-Automatic-Trade": "1"}
         if self.cfg.api_token:
             h["X-API-Token"] = self.cfg.api_token
         return h

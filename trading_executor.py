@@ -14,6 +14,7 @@ import config
 import Methods
 import settlement_db
 from logger import get_logger
+from order_utils import is_restricted_stop_loss
 from data_manager import get_data_manager
 from position_manager import get_position_manager
 
@@ -1434,11 +1435,13 @@ class TradingExecutor:
                     'stock_code':    r.get('stock_code', ''),
                     'stock_name':    r.get('stock_name', '') or '',
                     'volume':        int(r.get('volume', 0) or 0),
-                    'available':     int(r.get('available', r.get('volume', 0) or 0) or 0),
+                    'available':     int(r.get('available', 0) or 0),
                     'cost_price':    float(r.get('cost_price', 0) or 0),
                     'current_price': float(r.get('current_price', 0) or 0),
                     'market_value':  float(r.get('market_value', 0) or 0),
                     'profit_ratio':  float(r.get('profit_ratio', 0) or 0),
+                    **{key: r.get(key) for key in ('unavailable_volume', 'restriction_reason',
+                                                   'restriction_detail', 'position_asof')},
                 })
             return out
         except Exception as e:
@@ -1726,6 +1729,13 @@ class TradingExecutor:
                     return None
                 
                 # 如果指定了金额而不是数量，计算数量
+                if strategy not in ('M_real', 'M_simu', 'manual', 'manual_real', 'manual_simu'):
+                    held = self.position_manager.get_position(formatted_stock_code)
+                    if (config.ENABLE_DYNAMIC_STOP_PROFIT and is_restricted_stop_loss(
+                            held, price,
+                            config.STOP_LOSS_RATIO)):
+                        logger.warning(f"{formatted_stock_code} 已达止损条件且股份受限，暂停新增自动买入")
+                        return None
                 if volume is None and amount is not None:
                     volume = int(amount / price / 100) * 100  # 向下取整到100的整数倍
                     if volume == 0 and amount > 0:
@@ -2032,7 +2042,7 @@ class TradingExecutor:
                         logger.error(f"未持有 {stock_code}，无法卖出")
                         return None
                     
-                    total_volume = position['volume']
+                    total_volume = position.get('available', 0)
                     volume = int(total_volume * ratio / 100) * 100  # 转换为100的整数倍
                     
                     if volume <= 0:
@@ -2091,8 +2101,8 @@ class TradingExecutor:
                     )
                     logger.info(f"可卖出检查: 原始代码={formatted_stock_code}, 检查代码={check_stock_code}, 结果={can_sell}")
                 except Exception as e:
-                    logger.warning(f"检查股票是否可卖出时出错: {str(e)}，将继续尝试卖出")
-                    can_sell = True  # 如果检查失败，仍然尝试卖出
+                    logger.warning(f"检查股票是否可卖出时出错: {str(e)}，暂停本次卖出")
+                    can_sell = False
                 
                 if not can_sell:
                     logger.error(f"卖出 {formatted_stock_code} 未通过可卖出检查")

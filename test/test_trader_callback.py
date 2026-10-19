@@ -1176,6 +1176,8 @@ class TestTraderCallback(TestBase):
         strategy.position_manager = MagicMock()
         strategy.trading_executor = MagicMock()
         strategy.trading_executor.sell_stock.return_value = 672137218
+        strategy.position_manager.get_position.return_value = {
+            'volume': 5200, 'available': 5200, 'position_asof': datetime.now().isoformat()}
 
         old_sim = config.ENABLE_SIMULATION_MODE
         try:

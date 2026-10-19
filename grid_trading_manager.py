@@ -2993,13 +2993,9 @@ class GridTradingManager:
         return reserved
 
     def _get_reserved_sell_volume_unlocked(self, session_id: int) -> int:
-        """统计已提交但尚未终结的网格卖出数量，避免锁外下单窗口重复卖出。"""
+        """统计尚在提交窗口的预占，已受理委托由同向在途检查保护。"""
         reserved = 0
-        for pending in self.pending_grid_orders.values():
-            if pending.get('session_id') == session_id and pending.get('side') == 'SELL':
-                remaining_volume = int(pending.get('requested_volume') or 0) - int(pending.get('filled_volume') or 0)
-                if remaining_volume > 0:
-                    reserved += remaining_volume
+        # 已受理卖单由同向在途检查阻断，券商可用已扣除其占用，不能重复扣减。
         for plan in self.submitting_grid_orders.values():
             if plan.get('session_id') == session_id and plan.get('side') == 'SELL':
                 reserved += int(plan.get('volume') or 0)
@@ -3037,6 +3033,11 @@ class GridTradingManager:
             return None
 
         if signal_type == 'BUY':
+            from order_utils import is_restricted_stop_loss
+            if (config.ENABLE_DYNAMIC_STOP_PROFIT and is_restricted_stop_loss(
+                    position_snapshot, signal.get('latest_price', trigger_price), config.STOP_LOSS_RATIO)):
+                logger.warning(f"[网格] {stock_code} 已达止损条件且股份受限，暂停新增买入")
+                return None
             if session.max_investment <= 0:
                 logger.error(f"[网格] {stock_code} max_investment无效")
                 return None
@@ -3169,7 +3170,7 @@ class GridTradingManager:
                 logger.error(f"[网格] {stock_code} 持仓不存在")
                 return None
             current_volume = int(position.get('volume', 0) or 0)
-            available_volume = int(position.get('available', current_volume) or 0)
+            available_volume = int(position.get('available', 0) or 0)
             if current_volume <= 0 or available_volume <= 0:
                 logger.warning(f"[网格] {stock_code} 无可卖持仓")
                 return None
@@ -3676,7 +3677,7 @@ class GridTradingManager:
         # A-3修复：T+1 规则 - 当日买入的股份 available=0，不可当日卖出。
         # 使用 available（可卖数量）而非 volume（总持仓）作为卖出上限，防止向 QMT 提交无效委托。
         # 若持仓字典中无 available 字段（如部分 mock 或旧版快照），则退化为 current_volume（向后兼容）。
-        available_volume = position.get('available', current_volume)
+        available_volume = position.get('available', 0)
         cost_price = position.get('cost_price', trigger_price)
         logger.debug(f"[网格] _execute_grid_sell: 当前持仓 volume={current_volume}, "
                      f"available={available_volume}, cost_price={cost_price:.2f}")

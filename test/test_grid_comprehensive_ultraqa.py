@@ -233,6 +233,7 @@ class MockPositionManager:
                     'stock_code': pos['stock_code'],
                     'volume': pos['volume'],
                     'can_use_volume': pos.get('can_use_volume', pos['volume']),
+                    'available': pos.get('can_use_volume', 0),
                     'cost_price': pos['cost_price'],
                     'current_price': current_price,
                     'market_value': current_price * pos['volume'],

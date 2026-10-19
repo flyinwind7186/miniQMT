@@ -555,7 +555,7 @@ class TestStopProfitSignalFlow(TestBase):
 
     def test_validate_trading_signal_take_profit_full_skip_pending_orders(self):
         stock_code = self._insert_position(cost_price=10.0, current_price=10.5, profit_triggered=1,
-                                           available=0, volume=1000)
+                                           available=400, volume=1000)
         old_flag = getattr(config, "ALLOW_TAKE_PROFIT_FULL_WITH_PENDING", False)
         try:
             config.ALLOW_TAKE_PROFIT_FULL_WITH_PENDING = True

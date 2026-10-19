@@ -354,6 +354,7 @@ def heartbeat_logger():
             position_manager = None
 
             # 获取持仓信息
+            positions = None
             try:
                 position_manager = get_position_manager()
                 positions = position_manager.get_all_positions()
@@ -384,6 +385,9 @@ def heartbeat_logger():
             for status_line in _format_heartbeat_status_lines(active_grid_session_count):
                 logger.info(status_line)
             logger.info(f"   持仓数量:{position_count} | {asset_str}")
+            if positions is not None and 'unavailable_volume' in positions.columns:
+                restricted = positions[positions['unavailable_volume'].fillna(0) > 0]
+                logger.info(f"   受限持仓:{len(restricted)}只 | 不可卖数量:{int(restricted['unavailable_volume'].sum())}股")
             logger.info(_format_resource_line())
             logger.info(f"   {market_health_str}")
             logger.info("=" * 50)

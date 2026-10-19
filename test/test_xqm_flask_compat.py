@@ -197,6 +197,20 @@ class TestFlaskCompatEndpoints(unittest.TestCase):
         self.assertEqual(p["stock_code"], "000001")
         self.assertEqual(p["volume"], 1000)
         self.assertEqual(p["cost_price"], 10.0)
+        for key in ('unavailable_volume', 'restriction_reason', 'restriction_detail', 'position_asof'):
+            self.assertIn(key, p)
+
+    def test_positions_preserve_broker_restriction_explanation(self):
+        raw = [{'证券代码': '000001', '股票余额': 1000, '可用余额': 0,
+                '成本价': 10.0, '市值': 10000.0, 'unavailable_volume': 1000,
+                'restriction_reason': 't1', 'restriction_detail': '当日买入受限',
+                'position_asof': '2026-10-19T09:40:00'}]
+        with patch.object(self.manager, 'query_positions', return_value=raw):
+            response = self.client.get('/api/positions', headers={'X-Account-Id': ACC1})
+        position = response.json()['data']['positions'][0]
+        self.assertEqual(position['unavailable_volume'], 1000)
+        self.assertEqual(position['restriction_reason'], 't1')
+        self.assertEqual(position['position_asof'], '2026-10-19T09:40:00')
 
     def test_positions_stock_name_from_sqlite(self):
         """股票名称从 SQLite 持久化字段获取（position_manager 写入）"""

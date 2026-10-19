@@ -1136,7 +1136,7 @@
     // 判断持仓数据是否需要更新
     function shouldUpdateRow(oldData, newData) {
         // 检查关键字段是否有变化
-        const keysToCheck = ['current_price', 'market_value', 'profit_ratio', 'available', 'volume', 'change_percentage', 'base_cost_price', 'stop_profit_enabled'];
+        const keysToCheck = ['current_price', 'market_value', 'profit_ratio', 'available', 'volume', 'change_percentage', 'base_cost_price', 'stop_profit_enabled', 'unavailable_volume', 'restriction_reason', 'restriction_detail', 'position_asof'];
         return keysToCheck.some(key => {
             // 对于数值，考虑舍入误差
             if (typeof oldData[key] === 'number' && typeof newData[key] === 'number') {
@@ -1189,7 +1189,7 @@
 
         // 更新持仓信息
         cells[7].textContent = parseFloat(stock.market_value || 0).toFixed(0);
-        cells[8].textContent = parseFloat(stock.available || 0).toFixed(0);
+        cells[8].innerHTML = formatAvailability(stock);
         cells[9].textContent = parseFloat(stock.volume || 0).toFixed(0);
 
         // 更新止盈标志
@@ -1218,6 +1218,14 @@
     }
 
     // 创建新的持仓行（仅创建DOM结构，不设置checkbox状态）
+    function formatAvailability(stock) {
+        const available = stock.available == null ? '--' : Number(stock.available).toFixed(0);
+        const unavailable = stock.unavailable_volume == null ? '--' : Number(stock.unavailable_volume).toFixed(0);
+        const detail = escapeHtml(stock.restriction_detail || '原因待确认');
+        const asof = escapeHtml(stock.position_asof || '待确认');
+        return `${available}<div class="text-xs text-gray-500" title="持仓核对时间：${asof}">不可卖 ${unavailable} · ${detail}</div>`;
+    }
+
     function createStockRow(stock) {
         const row = document.createElement('tr');
         const normalizedCode = normalizeStockCode(stock.stock_code);
@@ -1258,7 +1266,7 @@
             <td class="border p-2">${parseFloat(stock.cost_price || 0).toFixed(2)}</td>
             <td class="border p-2 ${profitRatio >= 0 ? 'text-red-600' : 'text-green-600'}">${profitRatio.toFixed(2)}%</td>
             <td class="border p-2">${parseFloat(stock.market_value || 0).toFixed(0)}</td>
-            <td class="border p-2">${parseFloat(stock.available || 0).toFixed(0)}</td>
+            <td class="border p-2">${formatAvailability(stock)}</td>
             <td class="border p-2">${parseFloat(stock.volume || 0).toFixed(0)}</td>
             <td class="border p-2 text-center"><input type="checkbox" ${stock.profit_triggered ? 'checked' : ''} disabled></td>
             <td class="border p-2">${parseFloat(stock.highest_price || 0).toFixed(2)}</td>

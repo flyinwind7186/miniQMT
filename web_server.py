@@ -29,6 +29,7 @@ from grid_validation import validate_grid_config, validate_grid_template
 from order_utils import (
     ORDER_TYPE_BUY,
     format_order_time,
+    is_restricted_stop_loss,
     is_pending as order_is_pending,
     sort_orders,
     status_desc as order_status_desc,
@@ -1608,7 +1609,16 @@ def execute_buy():
         
         # 执行买入
         success_count = 0
+        blocked_stocks = []
         for stock_code in selected_stocks:
+            if request.headers.get('X-Automatic-Trade') == '1' and config.ENABLE_DYNAMIC_STOP_PROFIT:
+                position = get_position_manager_instance().get_position(stock_code)
+                quote = data_manager.get_latest_data(stock_code)
+                price = quote.get('lastPrice') if isinstance(quote, dict) else None
+                if is_restricted_stop_loss(position, price, config.STOP_LOSS_RATIO):
+                    blocked_stocks.append(stock_code)
+                    logger.warning(f"{stock_code} 已达止损条件且股份受限，拒绝自动买入请求")
+                    continue
             # 计算买入金额
             amount = config.POSITION_UNIT
             
@@ -1625,6 +1635,7 @@ def execute_buy():
             'status': 'success',
             'message': f'成功发送{success_count}个买入指令',
             'success_count': success_count,
+            'blocked_stocks': blocked_stocks,
             'total_count': len(selected_stocks)
         })
     except Exception as e:

@@ -120,7 +120,7 @@ class TestGridTradeRebuild(unittest.TestCase):
         print(f"  买入后中心价: {center_after_buy:.2f}")
 
         # Mock持仓
-        position = {'volume': 200, 'cost_price': 10.0}
+        position = {'volume': 200, 'available': 200, 'cost_price': 10.0}
         self.position_manager.get_position.return_value = position
 
         # 执行卖出
@@ -251,7 +251,7 @@ class TestGridTradeRebuild(unittest.TestCase):
             ('SELL', 10.3),
         ]
 
-        position = {'volume': 200, 'cost_price': 10.0}
+        position = {'volume': 200, 'available': 200, 'cost_price': 10.0}
         self.position_manager.get_position.return_value = position
 
         executed_trades = []  # 记录实际执行的交易

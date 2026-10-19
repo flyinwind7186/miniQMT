@@ -327,6 +327,18 @@
       ],
       "priority": "critical"
     },
+    "sellability": {
+      "name": "可卖数量与冻结状态集成回归",
+      "description": "验证 T+1、委托占用、可卖量竞态、网关成交确认与旧接口兼容",
+      "priority": "critical",
+      "modules": [
+        "test.test_sellability",
+        "test.test_stop_profit",
+        "test.test_xtquant_manager.test_account",
+        "test.test_xtquant_manager.test_client",
+        "test.test_xtquant_manager_integration"
+      ]
+    },
     "fast": {
       "name": "快速验证测试",
       "description": "关键功能快速验证（5分钟内完成）",

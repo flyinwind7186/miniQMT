@@ -599,7 +599,7 @@ class QmtIpcTrader:
             stock = str(pos.get('stock', ''))
             code6 = stock.split('.')[0] if '.' in stock else stock
             volume = pos.get('volume', 0)
-            available = pos.get('available', volume)  # 快照无 available 时用 volume 兜底
+            available = pos.get('available')  # 缺失值不能用总持仓冒充可卖量
             cost = pos.get('cost', 0)
             market_price = pos.get('market_price', 0)
             market_value = pos.get('market_value', market_price * volume)
@@ -827,8 +827,10 @@ class QmtIpcTrader:
                 pos_stock = str(pos.get('stock', ''))
                 pos6 = pos_stock.split('.')[0] if '.' in pos_stock else pos_stock
                 if pos6 == stock6:
-                    available = pos.get('available', pos.get('volume', 0))
-                    if available >= amount:
+                    from order_utils import position_quantities
+                    quantities = position_quantities(pos)
+                    available = quantities[1] if quantities is not None else None
+                    if available is not None and amount > 0 and available >= amount:
                         logger.info(f'允许卖出 股票={stock}, 可用={available} >= 卖出={amount}')
                         return True
                     logger.warning(f'不允许卖出,持股不足 股票={stock}, 可用={available} < 卖出={amount}')

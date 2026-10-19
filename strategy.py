@@ -11,6 +11,7 @@ import numpy as np
 
 import config
 from logger import get_logger, log_throttled, reset_log_throttle
+from order_utils import calculate_sell_volume, is_restricted_stop_loss, position_quantities
 from data_manager import get_data_manager
 from indicator_calculator import get_indicator_calculator
 from position_manager import get_position_manager
@@ -80,6 +81,8 @@ class TradingStrategy:
             )
             if not is_valid:
                 if validation_status == "blocked":
+                    if validation_reason == 't1_locked':
+                        return self.SIGNAL_EXECUTION_BLOCKED
                     # 阻断是持续性状态（T+1 冻结、委托在途），每轮都会命中，按股票+信号节流
                     log_throttled(
                         logger, logging.WARNING,
@@ -106,6 +109,8 @@ class TradingStrategy:
                 logger.warning(f"未知的信号类型: {signal_type}")
                 return self.SIGNAL_EXECUTION_FAILED
 
+            if success is None:
+                return self.SIGNAL_EXECUTION_BLOCKED
             return self.SIGNAL_EXECUTION_SUCCESS if success else self.SIGNAL_EXECUTION_FAILED
 
         except Exception as e:
@@ -135,6 +140,11 @@ class TradingStrategy:
 
             # 最终持仓限制检查（防止时差导致的超限）
             position = self.position_manager.get_position(stock_code)
+            if (config.ENABLE_DYNAMIC_STOP_PROFIT and is_restricted_stop_loss(
+                    position, add_position_info.get('current_price'), config.STOP_LOSS_RATIO)):
+                log_throttled(logger, logging.WARNING, f"restricted_buy:{stock_code}",
+                              f"{stock_code} 已达止损条件且股份受限，暂停新增补仓")
+                return False
             if position:
                 current_value = float(position.get('market_value', 0))
                 add_amount = add_position_info['add_amount']
@@ -270,7 +280,9 @@ class TradingStrategy:
         """
         try:
             # ✅ 修复C2: 删除重复验证，信号验证已在execute_trading_signal_direct()中完成
-            volume = signal_info['volume']
+            volume = self._resolve_sell_base_volume(stock_code, signal_info['volume'])
+            if volume <= 0:
+                return None
             current_price = signal_info['current_price']
 
             logger.warning(f"执行 {stock_code} 止损操作，数量: {volume}, 当前价格: {current_price:.2f}")
@@ -286,7 +298,7 @@ class TradingStrategy:
                 )
                 
                 if success:
-                    logger.warning(f"[模拟交易] {stock_code} 止损执行完成，持仓已清零")
+                    logger.warning(f"[模拟交易] {stock_code} 本次止损卖出完成，剩余持仓以同步数据为准")
                     return success
             else:
                 # 实盘交易：调用交易接口
@@ -313,26 +325,31 @@ class TradingStrategy:
             return False
 
     def _resolve_sell_base_volume(self, stock_code, fallback_volume):
-        """取首次止盈的卖出基准量：优先用执行时刻的实盘可用持仓，失败退回信号快照。
+        """重读执行时刻可卖量；明确为零或查询失败时阻断，不退回旧信号量。
 
         信号入队到执行之间有数秒延迟，期间同股可能已被网格或其它策略卖出，
         按检测时刻的快照计算会超卖（详见调用处注释）。
         """
         try:
-            self.position_manager.invalidate_positions_cache(reason='首次止盈前重读可卖量')
+            self.position_manager._invalidate_positions_cache(reason='卖出前重读可卖量')
             position = self.position_manager.get_position(stock_code)
-            if isinstance(position, dict):
-                available = int(position.get('available') or 0)
-                if available > 0:
-                    return available
-            logger.warning(
-                f"{stock_code} 首次止盈前未读到有效可用持仓，退回信号快照 {fallback_volume} 股"
-            )
+            quantities = position_quantities(position)
+            if quantities is not None:
+                if not config.ENABLE_SIMULATION_MODE:
+                    asof = position.get('position_asof')
+                    if not asof:
+                        return 0
+                    age = (datetime.now() - datetime.fromisoformat(str(asof))).total_seconds()
+                    if (datetime.fromisoformat(str(asof)).date() != datetime.now().date()
+                            or not 0 <= age <= config.QMT_POSITION_QUERY_INTERVAL + config.MONITOR_CALL_TIMEOUT):
+                        return 0
+                return quantities[1]
+            log_throttled(logger, logging.WARNING, f"sell_quantity_unknown:{stock_code}",
+                          f"{stock_code} 未取得可靠可卖数量，暂停卖出；旧信号量={fallback_volume}")
         except Exception as e:
-            logger.warning(
-                f"{stock_code} 首次止盈前重读可用持仓失败，退回信号快照 {fallback_volume} 股: {e}"
-            )
-        return fallback_volume
+            log_throttled(logger, logging.WARNING, f"sell_quantity_unknown:{stock_code}",
+                          f"{stock_code} 重读可卖数量失败，暂停卖出: {e}")
+        return 0
 
     def _execute_take_profit_half_signal(self, stock_code, signal_info):
         """
@@ -357,10 +374,12 @@ class TradingStrategy:
             # 计算卖出数量。信号里的 volume 是**检测时刻**的持仓快照，而策略线程单股消费
             # 周期可达 10+ 秒，其间网格/其他策略可能已卖掉同一只股票——按快照算会超卖
             # （2026-10-15 实盘：快照 6100 股，执行时可卖只剩 4600 股，"首次止盈卖 60%"
-            # 实际卖成了 84%）。基准量取执行时刻的真实可用持仓，取不到才退回快照。
+            # 实际卖成了 84%）。基准量取执行时刻的真实可用持仓，取不到则阻断。
             base_volume = self._resolve_sell_base_volume(stock_code, total_volume)
-            sell_volume = int(base_volume * sell_ratio / 100) * 100
-            sell_volume = max(sell_volume, 100)  # 至少100股
+            sell_volume = calculate_sell_volume(base_volume, sell_ratio,
+                                                lot_size=config.STOCK_TRADE_LOT_SIZE)
+            if sell_volume <= 0:
+                return None
 
             logger.info(f"执行 {stock_code} 首次止盈，卖出半仓，数量: {sell_volume}, 价格: {current_price:.2f}")
             if breakout_highest_price > 0:
@@ -431,7 +450,9 @@ class TradingStrategy:
         try:
             # ✅ 修复C2: 删除重复验证，信号验证已在execute_trading_signal_direct()中完成
 
-            volume = signal_info['volume']
+            volume = self._resolve_sell_base_volume(stock_code, signal_info['volume'])
+            if volume <= 0:
+                return None
             current_price = signal_info['current_price']
             dynamic_take_profit_price = signal_info['dynamic_take_profit_price']
 
@@ -449,7 +470,7 @@ class TradingStrategy:
                 )
                 
                 if success:
-                    logger.info(f"[模拟交易] {stock_code} 动态止盈执行完成，持仓已清零")
+                    logger.info(f"[模拟交易] {stock_code} 本次动态止盈卖出完成，剩余持仓以同步数据为准")
                     return success
             else:
                 # 实盘交易：调用交易接口

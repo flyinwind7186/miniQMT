@@ -928,6 +928,8 @@ def _register_routes(app: FastAPI, security_config: SecurityConfig):
             # 补仓摊薄前的初次建仓成本；无记录时退回当前成本价
             "base_cost_price": base_cp or cost,
             "stop_profit_enabled": bool(sp_on),
+            **{key: p.get(key) for key in ('unavailable_volume', 'restriction_reason',
+                                           'restriction_detail', 'position_asof')},
         }
 
     def _map_trade_to_flask(t: dict) -> dict:

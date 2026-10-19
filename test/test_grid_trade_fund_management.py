@@ -187,6 +187,7 @@ class TestGridTradeFundManagement(unittest.TestCase):
         position = {
             'stock_code': '000001.SZ',
             'volume': 200,
+            'available': 200,
             'cost_price': 10.0,
             'current_price': 10.5
         }
@@ -255,7 +256,7 @@ class TestGridTradeFundManagement(unittest.TestCase):
             self.assertGreater(investment_after_buy1, 0, "买入后投入应>0")
 
             # Mock持仓
-            position = {'volume': 200, 'cost_price': 10.0}
+            position = {'volume': 200, 'available': 200, 'cost_price': 10.0}
             self.position_manager.get_position.return_value = position
 
             # 第1次卖出
@@ -279,6 +280,7 @@ class TestGridTradeFundManagement(unittest.TestCase):
 
             # 第2次卖出
             position['volume'] = 400
+            position['available'] = 400
             self.manager._execute_grid_sell(session, sell_signal)
             investment_after_sell2 = session.current_investment
             print(f"  第2次卖出后投入={investment_after_sell2:.2f}")
@@ -326,7 +328,7 @@ class TestGridTradeFundManagement(unittest.TestCase):
         print(f"  买入后投入={investment_after_buy:.2f}")
 
         # Mock持仓200股
-        position = {'volume': 200, 'cost_price': 10.0}
+        position = {'volume': 200, 'available': 200, 'cost_price': 10.0}
         self.position_manager.get_position.return_value = position
 
         # 卖出200股，全部退出

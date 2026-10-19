@@ -96,7 +96,7 @@ class TestGridTradeStatistics(unittest.TestCase):
             print(f"  ✗ 第1次买入被拒绝")
 
         # Mock持仓
-        position = {'volume': 200, 'cost_price': 10.0}
+        position = {'volume': 200, 'available': 200, 'cost_price': 10.0}
         self.position_manager.get_position.return_value = position
 
         # 执行1次卖出
@@ -141,7 +141,7 @@ class TestGridTradeStatistics(unittest.TestCase):
         print(f"  ✓ 尝试2次买入，成功{successful_buys}次, buy_count={session.buy_count}")
 
         # Mock持仓
-        position = {'volume': 400, 'cost_price': 10.0}
+        position = {'volume': 400, 'available': 400, 'cost_price': 10.0}
         self.position_manager.get_position.return_value = position
 
         # 执行3次卖出
@@ -209,7 +209,7 @@ class TestGridTradeStatistics(unittest.TestCase):
         self.assertEqual(session.total_sell_amount, 0)
 
         # Mock持仓
-        position = {'volume': 1000, 'cost_price': 10.0}
+        position = {'volume': 1000, 'available': 1000, 'cost_price': 10.0}
         self.position_manager.get_position.return_value = position
 
         # 执行3次卖出
@@ -255,7 +255,7 @@ class TestGridTradeStatistics(unittest.TestCase):
         buy_signal = {'trigger_price': 10.0, 'grid_level': 'lower'}
         self.manager._execute_grid_buy(session, buy_signal)  # 买入200股 * 10.0 = 2000
 
-        position = {'volume': 200, 'cost_price': 10.0}
+        position = {'volume': 200, 'available': 200, 'cost_price': 10.0}
         self.position_manager.get_position.return_value = position
 
         session.position_ratio = 1.0  # 卖出100%
@@ -305,7 +305,7 @@ class TestGridTradeStatistics(unittest.TestCase):
         print(f"[OK] 买入记录完整: trade_id={buy_record['trade_id']}, volume={buy_record['volume']}, amount={buy_record['amount']:.2f}")
 
         # Mock持仓并执行卖出
-        position = {'volume': 200, 'cost_price': 10.0}
+        position = {'volume': 200, 'available': 200, 'cost_price': 10.0}
         self.position_manager.get_position.return_value = position
 
         sell_signal = {
@@ -370,7 +370,7 @@ class TestGridTradeStatistics(unittest.TestCase):
         buy_signal = {'trigger_price': 10.0, 'grid_level': 'lower'}
         result1 = self.manager._execute_grid_buy(session, buy_signal)
 
-        position = {'volume': 200, 'cost_price': 10.0}
+        position = {'volume': 200, 'available': 200, 'cost_price': 10.0}
         self.position_manager.get_position.return_value = position
 
         # 第1次卖出

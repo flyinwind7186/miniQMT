@@ -144,6 +144,7 @@ class _CacheTestBase(unittest.TestCase):
         pm._increment_data_version = MagicMock()
 
         for name in ('_invalidate_positions_cache', 'get_all_positions', 'get_position',
+                     '_update_position_restrictions', 'get_position_restriction',
                      '_mark_profit_breakout', '_reset_profit_breakout',
                      'mark_profit_triggered'):
             method = getattr(PositionManager, name, None)
