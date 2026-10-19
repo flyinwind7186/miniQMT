@@ -4782,12 +4782,14 @@ class PositionManager:
             signal_type, signal_info = self.check_trading_signals(stock_code, current_price)
             with self.signal_lock:
                 if signal_type:
+                    previous = self.latest_signals.get(stock_code)
                     self.latest_signals[stock_code] = {
                         'type': signal_type,
                         'info': signal_info,
                         'timestamp': datetime.now()
                     }
-                    logger.info(f"🔔 {stock_code} 检测到信号: {signal_type},等待策略处理")
+                    if not previous or previous.get('type') != signal_type:
+                        logger.info(f"🔔 {stock_code} 检测到信号: {signal_type},等待策略处理")
                 elif self._should_keep_alive_signal_unlocked(stock_code):
                     # 本轮未检测到信号，但已有信号尚未被策略线程消费且仍在保活窗口内：
                     # 保留而非删除。首次止盈等"跨过即触发"的瞬时信号，价格回踩一次就会
@@ -5153,7 +5155,7 @@ class PositionManager:
                 ['order_id', 'm_strOrderID', '订单编号', 'order_sysid', 'm_strOrderSysID', '系统订单号']
             )
             if stock_code and order_status == 54:
-                self._confirm_canceled_order(stock_code, order_id, "撤单回报")
+                self._confirm_canceled_order(stock_code, order_id, "撤单回报", defer_reorder=True)
 
             if stock_code and order_status not in [48, 49, 50, 51, 52, 55]:
                 self._request_immediate_position_refresh(stock_code, f"委托终态({order_status})")
@@ -5391,7 +5393,7 @@ class PositionManager:
             self._request_immediate_position_refresh(stock_code_base, source)
         return bool(matched_key or order_info)
 
-    def _confirm_canceled_order(self, stock_code, order_id, source):
+    def _confirm_canceled_order(self, stock_code, order_id, source, defer_reorder=False):
         """统一处理撤单完成确认：收到 54=已撤 后再清理旧委托，并按配置重挂。"""
         stock_code_base = self._base_stock_code(stock_code)
         pending_snapshot = {}
@@ -5403,8 +5405,15 @@ class PositionManager:
                 matched_key = self._find_cancel_requested_order_key_locked(stock_code_base)
 
             if matched_key:
-                pending_snapshot = dict(self.pending_orders.get(matched_key) or {})
-                del self.pending_orders[matched_key]
+                pending_entry = self.pending_orders[matched_key]
+                if pending_entry.get('status') == 'reordering':
+                    return False
+                pending_snapshot = dict(pending_entry)
+                if pending_snapshot.get('reorder_after_cancel', False):
+                    # 重挂发出到新委托登记之间仍须阻断同股信号和重复撤单回报。
+                    pending_entry['status'] = 'reordering'
+                else:
+                    del self.pending_orders[matched_key]
 
         if not matched_key:
             return False
@@ -5423,7 +5432,26 @@ class PositionManager:
                 f"🔄 [REORDER] {stock_code_base} 撤单完成，按配置重新挂单 "
                 f"(价格模式: {config.PENDING_ORDER_REORDER_PRICE_MODE})"
             )
-            self._reorder_after_cancel(stock_code_base, signal_type, signal_info)
+            def _reorder():
+                try:
+                    self._reorder_after_cancel(stock_code_base, signal_type, signal_info)
+                finally:
+                    with self.pending_orders_lock:
+                        if self.pending_orders.get(matched_key) is pending_entry:
+                            self.pending_orders.pop(matched_key, None)
+
+            if defer_reorder:
+                # QMT 回调内不能等待下一次异步回报，否则会阻塞 seq 映射和成交推送。
+                try:
+                    threading.Thread(target=_reorder, name=f"OrderReorder-{stock_code_base}",
+                                     daemon=True).start()
+                except Exception:
+                    with self.pending_orders_lock:
+                        if self.pending_orders.get(matched_key) is pending_entry:
+                            pending_entry['status'] = pending_snapshot.get('status', 'cancel_requested')
+                    raise
+            else:
+                _reorder()
         elif pending_snapshot.get('status') == 'cancel_requested':
             logger.warning(
                 f"⚠️ [REORDER] {stock_code_base} 撤单完成，但 PENDING_ORDER_AUTO_REORDER=False，"
@@ -5481,6 +5509,8 @@ class PositionManager:
             check_time = datetime.now()
             with self.pending_orders_lock:
                 for stock_code, order_info in list(self.pending_orders.items()):
+                    if order_info.get('status') == 'reordering':
+                        continue
                     submit_time = order_info['submit_time']
                     signal_type = order_info.get('signal_type')
                     timeout_minutes = self._get_pending_order_timeout_minutes(signal_type)
@@ -5510,6 +5540,8 @@ class PositionManager:
         参数:
         order_info (dict): 委托单信息
         """
+        if order_info.get('status') == 'reordering':
+            return
         try:
             stock_code = order_info['stock_code']
             order_id = order_info['order_id']

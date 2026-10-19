@@ -401,6 +401,7 @@ def check_snapshot_health(lookback_days=7, db_path=None):
     account = get_account_id()
     today = datetime.now().date()
     missing = []
+    checked_days = []
 
     try:
         conn = _connect(db_path)
@@ -410,9 +411,14 @@ def check_snapshot_health(lookback_days=7, db_path=None):
                 trading, confident = trade_calendar.is_trading_day_confident(day)
                 if not trading or not confident:
                     continue
+                checked_days.append(day)
+                # 空仓快照不产生持仓行，仅零市值的净值记录可补足完成凭据。
                 got = {r['snapshot_type'] for r in conn.execute(
                     "SELECT DISTINCT snapshot_type FROM position_snapshot "
-                    "WHERE account=? AND snapshot_date=?", (account, day))}
+                    "WHERE account=? AND snapshot_date=? "
+                    "UNION SELECT snapshot_type FROM account_equity_daily "
+                    "WHERE account=? AND date=? AND market_value=0",
+                    (account, day, account, day))}
                 lack = {SNAPSHOT_OPEN, SNAPSHOT_CLOSE} - got
                 if lack:
                     missing.append((day, sorted(lack)))
@@ -425,6 +431,8 @@ def check_snapshot_health(lookback_days=7, db_path=None):
     missing.sort()
     # 连续两个交易日都缺 = 故障
     for i in range(len(missing) - 1):
+        if checked_days.index(missing[i][0]) - checked_days.index(missing[i + 1][0]) != 1:
+            continue
         log_event('snapshot_missing_streak', 'ERROR', {
             'days': [missing[i][0], missing[i + 1][0]],
             'missing': [missing[i][1], missing[i + 1][1]]}, db_path=db_path)

@@ -783,7 +783,7 @@ class TradingStrategy:
                         signal_info = signal_data['info']
 
                         if signal_type == 'stop_loss':
-                            logger.warning(f"⚠️  【场景{scenario}】{stock_code} 检测到止损信号(仓位已满)")
+                            logger.debug(f"【场景{scenario}】{stock_code} 检测到止损信号(仓位已满)，准备验证")
 
                             if config.ENABLE_AUTO_TRADING:
                                 result = self.execute_trading_signal_direct(stock_code, signal_type, signal_info)
@@ -816,7 +816,7 @@ class TradingStrategy:
                         signal_info = signal_data['info']
 
                         if signal_type == 'stop_loss':
-                            logger.warning(f"⚠️  【场景{scenario}】{stock_code} 检测到止损信号(最高优先级)，立即处理")
+                            logger.debug(f"【场景{scenario}】{stock_code} 检测到止损信号(最高优先级)，准备验证")
 
                             if config.ENABLE_AUTO_TRADING:
                                 result = self.execute_trading_signal_direct(stock_code, signal_type, signal_info)

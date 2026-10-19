@@ -518,6 +518,46 @@ class TestSnapshotHealth(SettlementDBTestBase):
                             ('snapshot_missing_streak',))
         self.assertEqual(len(events), 1, "连续 2 个交易日缺失应告警一次")
 
+    def test_empty_positions_with_zero_market_value_are_complete(self):
+        """空仓日没有持仓行，零市值净值快照可证明当天快照已完成。"""
+        days = self._recent_days(2)
+        self._pin_trading_days(days)
+        pm = FakePositionManager(account_info={
+            'total_asset': 100000.0, 'market_value': 0.0,
+            'available': 100000.0, 'frozen_cash': 0.0})
+        for day in days:
+            for stype in (sdb.SNAPSHOT_OPEN, sdb.SNAPSHOT_CLOSE):
+                self.assertEqual(sdb.write_position_snapshot(
+                    pm, stype, snapshot_date=day, db_path=self.db), 0)
+                self.assertTrue(sdb.write_equity_snapshot(
+                    pm, stype, snapshot_date=day, db_path=self.db))
+        self.assertEqual(sdb.check_snapshot_health(lookback_days=7, db_path=self.db), [])
+
+    def test_nonzero_market_value_does_not_hide_missing_positions(self):
+        """有持仓市值时，单独的净值记录不能证明持仓快照已写入。"""
+        days = self._recent_days(2)
+        self._pin_trading_days(days)
+        pm = FakePositionManager(account_info={
+            'total_asset': 100000.0, 'market_value': 10000.0,
+            'available': 90000.0, 'frozen_cash': 0.0})
+        for day in days:
+            for stype in (sdb.SNAPSHOT_OPEN, sdb.SNAPSHOT_CLOSE):
+                self.assertTrue(sdb.write_equity_snapshot(
+                    pm, stype, snapshot_date=day, db_path=self.db))
+        self.assertEqual(len(sdb.check_snapshot_health(lookback_days=7, db_path=self.db)), 2)
+
+    def test_healthy_trading_day_breaks_missing_streak(self):
+        """缺失日中间有正常交易日时，保留缺口列表但不得误报连续缺失。"""
+        days = self._recent_days(3)
+        self._pin_trading_days(days)
+        pm = FakePositionManager(make_positions([
+            ['000001', '测试股票', 1000, 1000, 10.0, 10.0, 10.0, 10000.0, 0.0]]))
+        self._write_snapshots(pm, [days[1]])
+        missing = sdb.check_snapshot_health(lookback_days=7, db_path=self.db)
+        self.assertEqual({day for day, _ in missing}, {days[0], days[2]})
+        self.assertEqual(self.query(
+            "SELECT * FROM run_events WHERE event_type='snapshot_missing_streak'"), [])
+
 
 class TestMigrationGuards(unittest.TestCase):
     def test_production_db_rejected_for_destructive_ops(self):

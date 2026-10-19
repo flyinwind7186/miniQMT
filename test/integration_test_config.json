@@ -200,7 +200,9 @@
         "test.test_thread_monitoring",
         "test.test_premarket_xttrader_reinit",
         "test.test_trade_time_windows",
-        "test.test_trade_calendar"
+        "test.test_trade_calendar",
+        "test.test_runtime_logging",
+        "test.test_runtime_log_regression"
       ],
       "priority": "critical"
     },

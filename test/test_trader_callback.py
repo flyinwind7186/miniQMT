@@ -829,6 +829,8 @@ class TestTraderCallback(TestBase):
                 self.assertEqual(self.pm.pending_orders[stock_code]["status"], "cancel_requested")
                 mock_executor.sell_stock.assert_not_called()
                 self.pm._on_order_callback(_FakeOrder(stock_code, 54, old_order_id))
+                self.assertTrue(self.wait_for_condition(
+                    lambda: self.pm.pending_orders.get(stock_code, {}).get("order_id") == new_order_id))
         finally:
             config.PENDING_ORDER_AUTO_REORDER = old_reorder
 
@@ -987,6 +989,7 @@ class TestTraderCallback(TestBase):
                 mock_cancel.assert_called_once()
                 # 撤单成交回报 → 进入重挂分支，但应被方向门控拦截
                 self.pm._on_order_callback(_FakeOrder(stock_code, 54, old_order_id))
+                self.assertTrue(self.wait_for_condition(lambda: stock_code not in self.pm.pending_orders))
         finally:
             config.PENDING_ORDER_AUTO_REORDER = old_reorder
 
