@@ -479,7 +479,7 @@ class TradingExecutor:
             grid_manager = getattr(self.position_manager, 'grid_manager', None)
             if getattr(config, 'ENABLE_GRID_TRADING', False) and grid_manager:
                 try:
-                    grid_manager.handle_order_callback(order_info)
+                    grid_manager.handle_order_callback(order_info, defer_reorder=True)
                 except Exception as grid_err:
                     logger.warning(f"网格委托状态回调处理失败: {grid_err}")
 

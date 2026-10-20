@@ -1218,7 +1218,7 @@ class GridTradingManager:
                     continue
 
                 local_status = str(pending.get('status') or 'submitted')
-                if local_status == 'cancel_failed':
+                if local_status in ('cancel_failed', 'reordering'):
                     continue
                 if local_status == 'cancel_requested':
                     cancel_at = pending.get('cancel_requested_at')
@@ -1518,6 +1518,8 @@ class GridTradingManager:
                 for order_id, pending in open_orders:
                     pending['stop_requested'] = True
                     pending['stop_reason'] = reason
+                    if pending.get('status') == 'reordering':
+                        continue  # 原单已经撤销，等待后台任务退出后完成停止。
                     cancel_orders.append(order_id)
                     try:
                         if hasattr(self.db, 'update_grid_order'):
@@ -2784,7 +2786,7 @@ class GridTradingManager:
             self._complete_stop_if_no_open_orders_unlocked(pending['session_id'])
             return True
 
-    def handle_order_callback(self, order) -> bool:
+    def handle_order_callback(self, order, defer_reorder: bool = False) -> bool:
         """处理网格委托状态回报，撤单/废单/拒单时清理 pending 委托"""
         order_id = self._get_attr_or_key(order, ('order_id', 'm_strOrderSysID', 'order_sys_id'))
         if order_id is None:
@@ -2819,6 +2821,8 @@ class GridTradingManager:
                         logger.warning(f"[网格] 更新历史委托状态失败 委托号={order_id}, err={db_err}")
                     return True
                 return False
+            if pending.get('status') == 'reordering':
+                return True
 
             filled_volume = int(pending.get('filled_volume') or 0)
             requested_volume = int(pending.get('requested_volume') or 0)
@@ -2840,7 +2844,19 @@ class GridTradingManager:
                 logger.error(f"[网格] 更新委托终态失败 委托号={order_id}, err={db_err}")
                 return False
 
-            self.pending_grid_orders.pop(order_id, None)
+            session = self._find_session_by_id(pending.get('session_id'))
+            if (status == 54 and new_status == 'canceled'
+                    and bool(pending.get('reorder_after_cancel'))
+                    and not pending.get('stop_requested')
+                    and session and session.status == 'active'):
+                reorder_snapshot = dict(pending)
+
+            if reorder_snapshot and defer_reorder:
+                # 后台准备重挂时保留原单占位，阻断同方向新单并保留买入预算。
+                pending['status'] = 'reordering'
+                pending['reorder_after_cancel'] = False
+            else:
+                self.pending_grid_orders.pop(order_id, None)
             tracker = self.trackers.get(pending.get('session_id'))
             if tracker:
                 tracker.waiting_callback = False
@@ -2851,16 +2867,37 @@ class GridTradingManager:
                 f"status={status}, mapped={new_status}, filled={filled_volume}/{requested_volume}"
             )
 
-            session = self._find_session_by_id(pending.get('session_id'))
-            if (status == 54 and new_status == 'canceled'
-                    and bool(pending.get('reorder_after_cancel'))
-                    and not pending.get('stop_requested')
-                    and session and session.status == 'active'):
-                reorder_snapshot = dict(pending)
-
         if reorder_snapshot:
-            self._reorder_grid_order_after_cancel(reorder_snapshot)
+            if defer_reorder:
+                try:
+                    threading.Thread(
+                        target=self._run_grid_reorder_after_cancel,
+                        args=(reorder_snapshot,), daemon=True,
+                        name=f"GridReorder-{order_id}"
+                    ).start()
+                except Exception:
+                    with self.lock:
+                        if self.pending_grid_orders.get(order_id) is pending:
+                            pending['status'] = 'cancel_requested'
+                            pending['reorder_after_cancel'] = True
+                    raise
+            else:
+                self._reorder_grid_order_after_cancel(reorder_snapshot)
         return True
+
+    def _run_grid_reorder_after_cancel(self, pending_snapshot: dict) -> None:
+        """在后台重挂，异常或提前退出时释放占位并完成可能的会话停止。"""
+        order_id = str(pending_snapshot.get('order_id') or '')
+        try:
+            self._reorder_grid_order_after_cancel(pending_snapshot)
+        except Exception as e:
+            logger.error(f"[网格] 后台重挂失败 委托号={order_id}, err={e}", exc_info=True)
+        finally:
+            with self.lock:
+                pending = self.pending_grid_orders.get(order_id)
+                if pending and pending.get('status') == 'reordering':
+                    self.pending_grid_orders.pop(order_id, None)
+                self._complete_stop_if_no_open_orders_unlocked(pending_snapshot['session_id'])
 
     def _restore_tracker_waiting_for_reorder_unlocked(self, session: GridSession,
                                                       signal: dict, side: str) -> None:
@@ -2953,6 +2990,10 @@ class GridTradingManager:
                 self._reset_tracker_after_failed_trade_unlocked(session, side)
                 return False
 
+            pending = self.pending_grid_orders.get(parent_order_id)
+            if pending and pending.get('status') == 'reordering':
+                # 同一把锁内将原单占位交接给 submitting，不产生重复下单窗口。
+                self.pending_grid_orders.pop(parent_order_id)
             plan = self._build_grid_order_plan(session, signal, position_snapshot=position_snapshot)
             if not plan:
                 logger.warning(f"[网格] 生成重挂计划失败 委托号={parent_order_id}")
@@ -2962,9 +3003,16 @@ class GridTradingManager:
             plan['reorder_count'] = reorder_count + 1
             self.submitting_grid_orders[plan['submit_id']] = plan
 
-        result = self._submit_grid_order_outside_lock(plan)
-        order_id = self._extract_order_id(result)
+        try:
+            result = self._submit_grid_order_outside_lock(plan)
+            order_id = self._extract_order_id(result)
+        except Exception:
+            with self.lock:
+                self.submitting_grid_orders.pop(plan['submit_id'], None)
+                self._complete_stop_if_no_open_orders_unlocked(plan['session_id'])
+            raise
 
+        cancel_after_accept = None
         with self.lock:
             self.submitting_grid_orders.pop(plan['submit_id'], None)
             session = self._find_session_by_id(plan['session_id'])
@@ -2997,8 +3045,24 @@ class GridTradingManager:
                     'reorder_after_cancel': 0,
                 })
             self._restore_tracker_waiting_for_reorder_unlocked(session, signal, side)
+            if session.status == 'stopping' or plan.get('stop_requested'):
+                new_pending['stop_requested'] = True
+                new_pending['stop_reason'] = session.stop_reason or plan.get('stop_reason')
+                self._mark_grid_order_cancel_requested_unlocked(
+                    str(order_id), new_pending, reason='stop requested during reorder')
+                cancel_after_accept = str(order_id)
             self.position_manager._increment_data_version()
 
+        if cancel_after_accept and not self._cancel_grid_order(cancel_after_accept):
+            with self.lock:
+                pending = self.pending_grid_orders.get(cancel_after_accept)
+                if pending:
+                    pending['status'] = 'cancel_failed'
+                    self.db.update_grid_order(cancel_after_accept, {
+                        'status': 'cancel_failed',
+                        'last_error': 'cancel failed after stop requested during reorder'
+                    })
+            logger.error(f"[网格] 停止会话时重挂单撤单失败 委托号={cancel_after_accept}")
         logger.info(
             f"[网格] 重挂成功 股票代码={stock_code}, 原委托号={parent_order_id}, "
             f"新委托号={order_id}, 方向={config.TRADE_SIDE_LABELS.get(side, side)}, "

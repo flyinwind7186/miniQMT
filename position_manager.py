@@ -5276,7 +5276,7 @@ class PositionManager:
 
             grid_manager = getattr(self, 'grid_manager', None)
             if getattr(config, 'ENABLE_GRID_TRADING', False) and grid_manager:
-                grid_manager.handle_order_callback(order)
+                grid_manager.handle_order_callback(order, defer_reorder=True)
         except Exception as e:
             logger.warning(f"[网格] 委托状态回调处理失败: {e}")
 

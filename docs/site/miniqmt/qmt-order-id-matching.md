@@ -58,6 +58,16 @@ miniQMT 默认使用 `order_stock_async()` 下单。该接口同步返回的是�
 - 按同股票、同方向进入 `ASYNC_ORDER_UNKNOWN_COOLDOWN_SECONDS` 冷却。
 - 如果迟到 callback 后续补上 `seq -> order_id`，应解除 unknown，并补齐最小 `order_cache`；若有策略信号上下文，也补入 `pending_orders`，让成交/撤单回调继续闭环。
 
+### 撤单回调后的后台重挂
+
+QMT 的委托推送和异步下单回报共用一个工作线程。在撤单回调内同步重挂并等待映射，会占用这个线程，让新单回报排队，最终依赖查询兜底才能返回。查询响应的独立调度不能消除这一阻塞。
+
+- `PositionManager` 和 `TradingExecutor` 的券商回调入口均使用 `defer_reorder=True`，将网格重挂交给后台线程；运行期对账保留同步处理方式。
+- 后台准备期间，原单以仅存在内存中的 `reordering` 状态保留防重与买入预算占位，持久化委托仍为已撤；重复回报和超时扫描不得重复重挂或撤单。
+- 下单计划生成时，在同一把网格锁内将原单占位切换为提交预占，避免同方向重复下单和预算释放空窗。
+- 线程启动失败时保留可重试状态；重挂失败或会话暂停时释放占位。停止会话时，准备中的任务退出；已提交的新单在受理后进入撤单闭环。
+- 回归测试位于 [网格订单生命周期测试](https://github.com/weihong-su/miniQMT/blob/main/test/test_grid_order_lifecycle_and_ledger.py)，使用单线程回报队列、内存数据库和模拟执行器验证两个入口及并发边界。
+
 ## 相关配置
 
 | 配置 | 默认值 | 说明 |

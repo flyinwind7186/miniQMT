@@ -416,8 +416,12 @@ def heartbeat_logger():
                 logger.info(f"   受限持仓:{len(restricted)}只 | 不可卖数量:{int(restricted['unavailable_volume'].sum())}股")
             logger.info(_format_resource_line())
             sync_status = position_manager.get_sync_status()
-            logger.info(f"   持久化: 最近成功距今={sync_status['age_seconds']}秒，"
-                        f"最近同步耗时={sync_status['duration_seconds']}秒，"
+            sync_age = sync_status['age_seconds']
+            sync_duration = sync_status['duration_seconds']
+            sync_age_text = f"{sync_age:.2f}" if sync_age is not None else "None"
+            sync_duration_text = f"{sync_duration:.2f}" if sync_duration is not None else "None"
+            logger.info(f"   持久化: 最近成功距今={sync_age_text}秒，"
+                        f"最近同步耗时={sync_duration_text}秒，"
                         f"最近委托超时处理延迟={position_manager.last_order_timeout_delay_seconds:.2f}秒")
             logger.info(f"   {market_health_str}")
             logger.info("=" * 50)

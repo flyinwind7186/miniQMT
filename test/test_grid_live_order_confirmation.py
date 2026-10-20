@@ -781,7 +781,8 @@ class TestGridLiveOrderConfirmation(unittest.TestCase):
         with patch.object(config, 'ENABLE_GRID_TRADING', True):
             position_manager._on_order_callback(order)
 
-        position_manager.grid_manager.handle_order_callback.assert_called_once_with(order)
+        position_manager.grid_manager.handle_order_callback.assert_called_once_with(
+            order, defer_reorder=True)
 
 
 if __name__ == '__main__':

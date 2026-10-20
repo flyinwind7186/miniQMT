@@ -12,15 +12,19 @@ import sys
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta
-from unittest.mock import Mock
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import config
 from grid_database import DatabaseManager
 from grid_trading_manager import GridSession, GridTradingManager, PriceTracker
+from position_manager import PositionManager
+from trading_executor import TradingExecutor
 
 
 class FakeTrade:
@@ -263,6 +267,213 @@ class TestGridOrderOutsideLock(GridLifecycleLedgerBase):
 
         self.assertFalse(self.manager.execute_grid_trade(self.buy_signal(session, price=10.0)))
         self.executor.buy_stock.assert_not_called()
+
+
+class TestGridDeferredReorder(GridLifecycleLedgerBase):
+    def prepare_cancel(self, side='BUY'):
+        config.ENABLE_SIMULATION_MODE = False
+        config.GRID_CONFIRM_LIVE_ORDER_BY_DEAL = True
+        self.session = self.make_session()
+        signal = self.buy_signal(self.session) if side == 'BUY' else self.sell_signal(self.session)
+        self.position_manager.data_manager.get_latest_data.return_value = {
+            'lastPrice': signal['trigger_price']}
+        submit = self.executor.buy_stock if side == 'BUY' else self.executor.sell_stock
+        submit.return_value = {'order_id': 'ORDER_OLD'}
+        self.assertTrue(self.manager.execute_grid_trade(signal))
+        self.manager.pending_grid_orders['ORDER_OLD'].update(
+            status='cancel_requested', reorder_after_cancel=True)
+        submit.return_value = {'order_id': 'ORDER_NEW'}
+        order = FakeOrderInfo('ORDER_OLD')
+        order.stock_code = self.session.stock_code
+        order.m_strInstrumentID = self.session.stock_code
+        self.position_manager.grid_manager = self.manager
+        return order, signal, submit
+
+    @contextmanager
+    def blocked_reorder(self, order, method):
+        entered = threading.Event()
+        release = threading.Event()
+        workers = []
+        original = getattr(self.manager, method)
+
+        def blocked(*args, **kwargs):
+            workers.append(threading.current_thread())
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError('测试未释放重挂任务')
+            return original(*args, **kwargs)
+
+        with patch.object(self.manager, method, side_effect=blocked):
+            try:
+                self.assertTrue(self.manager.handle_order_callback(order, defer_reorder=True))
+                self.assertTrue(entered.wait(2))
+                yield
+            finally:
+                release.set()
+                for worker in workers:
+                    worker.join(3)
+                    self.assertFalse(worker.is_alive())
+
+    def assert_callback_returns_before_async_order_response(self, use_executor=False):
+        """单线程回报队列必须能在撤单回调返回后继续分发新单回报。"""
+        order, _, submit = self.prepare_cancel()
+        entered = threading.Event()
+        acknowledged = threading.Event()
+        workers = []
+        callback_threads = []
+        with ThreadPoolExecutor(max_workers=1) as callbacks:
+            def reorder(**kwargs):
+                workers.append(threading.current_thread())
+                callbacks.submit(acknowledged.set)
+                entered.set()
+                if not acknowledged.wait(3):
+                    raise RuntimeError('异步回报被撤单回调阻塞')
+                return {'order_id': 'ORDER_NEW'}
+
+            def on_cancel():
+                callback_threads.append(threading.current_thread())
+                if use_executor:
+                    executor = Mock(position_manager=self.position_manager)
+                    executor.order_cache = {}
+                    executor.callbacks = {}
+                    TradingExecutor._on_order_callback(executor, order)
+                else:
+                    PositionManager._on_order_callback(self.position_manager, order)
+
+            submit.side_effect = reorder
+            with patch.object(config, 'ENABLE_GRID_TRADING', True):
+                future = callbacks.submit(on_cancel)
+                try:
+                    self.assertTrue(entered.wait(2))
+                    future.result(timeout=1)
+                finally:
+                    acknowledged.set()
+        for worker in workers:
+            worker.join(3)
+            self.assertFalse(worker.is_alive())
+        self.assertIsNot(workers[0], callback_threads[0])
+        self.assertNotIn('ORDER_OLD', self.manager.pending_grid_orders)
+        self.assertIn('ORDER_NEW', self.manager.pending_grid_orders)
+
+    def test_position_callback_returns_before_async_order_response(self):
+        self.assert_callback_returns_before_async_order_response()
+
+    def test_executor_callback_returns_before_async_order_response(self):
+        self.assert_callback_returns_before_async_order_response(use_executor=True)
+
+    def assert_reservation(self, side, method):
+        order, signal, submit = self.prepare_cancel(side)
+        with self.blocked_reorder(order, method):
+            with self.manager.lock:
+                self.assertTrue(self.manager._has_open_same_side_order_unlocked(
+                    self.session.id, side))
+                if side == 'BUY':
+                    self.assertGreater(
+                        self.manager._get_reserved_buy_amount_unlocked(self.session.id), 0)
+                self.assertIsNone(self.manager._build_grid_order_plan(
+                    self.session, signal, self.position_manager.get_position.return_value))
+            # 回调重复到达和运行期超时检查均不得再次发起重挂或撤单。
+            self.assertTrue(self.manager.handle_order_callback(order, defer_reorder=True))
+            self.manager._handle_timed_out_grid_orders(['ORDER_OLD'], [])
+            self.executor.cancel_order.assert_not_called()
+            self.assertEqual(submit.call_count, 1)
+        self.assertEqual(submit.call_count, 2)
+        self.assertNotIn('ORDER_OLD', self.manager.pending_grid_orders)
+        self.assertIn('ORDER_NEW', self.manager.pending_grid_orders)
+        self.assertFalse(self.manager.submitting_grid_orders)
+        self.manager.handle_order_callback(order, defer_reorder=True)
+        self.assertEqual(submit.call_count, 2)
+        # 已重挂一次的新单到达终态后，不再自动重挂。
+        self.manager.handle_order_callback(FakeOrderInfo('ORDER_NEW'), defer_reorder=True)
+        self.assertFalse(self.manager.pending_grid_orders)
+
+    def test_buy_reservation_during_preparation(self):
+        self.assert_reservation('BUY', '_get_latest_price_for_signal')
+
+    def test_sell_reservation_during_preparation(self):
+        self.assert_reservation('SELL', '_get_latest_price_for_signal')
+
+    def test_buy_reservation_during_submission(self):
+        self.assert_reservation('BUY', '_submit_grid_order_outside_lock')
+
+    def test_sell_reservation_during_submission(self):
+        self.assert_reservation('SELL', '_submit_grid_order_outside_lock')
+
+    def test_worker_start_failure_allows_reconcile_retry(self):
+        order, _, submit = self.prepare_cancel()
+        with patch.object(threading.Thread, 'start', side_effect=RuntimeError('线程启动失败')):
+            with self.assertRaises(RuntimeError):
+                self.manager.handle_order_callback(order, defer_reorder=True)
+        pending = self.manager.pending_grid_orders['ORDER_OLD']
+        self.assertEqual(pending['status'], 'cancel_requested')
+        self.assertTrue(pending['reorder_after_cancel'])
+        self.assertTrue(self.manager.handle_order_callback(order))
+        self.assertEqual(submit.call_count, 2)
+        self.assertIn('ORDER_NEW', self.manager.pending_grid_orders)
+
+    def test_submission_exception_releases_all_reservations(self):
+        order, _, submit = self.prepare_cancel()
+        submit.side_effect = RuntimeError('下单失败')
+        with patch('grid_trading_manager.logger.error') as error:
+            with self.blocked_reorder(order, '_get_latest_price_for_signal'):
+                pass
+        error.assert_called_once()
+        self.assertFalse(self.manager.pending_grid_orders)
+        self.assertFalse(self.manager.submitting_grid_orders)
+        self.assertEqual(self.db.get_grid_order('ORDER_OLD')['status'], 'canceled')
+
+    def test_pause_during_preparation_prevents_submission(self):
+        order, _, submit = self.prepare_cancel()
+        with self.blocked_reorder(order, '_get_latest_price_for_signal'):
+            self.session.enabled = False
+        self.assertEqual(submit.call_count, 1)
+        self.assertFalse(self.manager.pending_grid_orders)
+        self.assertFalse(self.manager.submitting_grid_orders)
+
+    def test_stop_during_preparation_completes_without_recanceling_old_order(self):
+        order, _, submit = self.prepare_cancel()
+        with self.blocked_reorder(order, '_get_latest_price_for_signal'):
+            result = self.manager.stop_grid_session(self.session.id, 'manual')
+            self.assertEqual(result['status'], 'stopping')
+            self.executor.cancel_order.assert_not_called()
+        self.assertEqual(submit.call_count, 1)
+        self.assertFalse(self.manager.pending_grid_orders)
+        self.assertEqual(self.db.get_grid_session(self.session.id)['status'], 'stopped')
+        self.assertEqual(self.db.get_grid_order('ORDER_OLD')['status'], 'canceled')
+
+    def test_stop_during_submission_cancels_new_order_after_acceptance(self):
+        order, _, _ = self.prepare_cancel()
+        self.executor.cancel_order.return_value = True
+        with self.blocked_reorder(order, '_submit_grid_order_outside_lock'):
+            result = self.manager.stop_grid_session(self.session.id, 'manual')
+            self.assertEqual(result['status'], 'stopping')
+            self.executor.cancel_order.assert_not_called()
+        self.executor.cancel_order.assert_called_once_with('ORDER_NEW')
+        self.assertTrue(self.manager.pending_grid_orders['ORDER_NEW']['stop_requested'])
+        self.assertEqual(self.db.get_grid_order('ORDER_NEW')['status'], 'cancel_requested')
+        self.manager.handle_order_callback(FakeOrderInfo('ORDER_NEW'), defer_reorder=True)
+        self.assertEqual(self.db.get_grid_session(self.session.id)['status'], 'stopped')
+
+    def test_cancel_failure_after_stop_keeps_new_order_tracked(self):
+        order, _, _ = self.prepare_cancel()
+        self.executor.cancel_order.return_value = False
+        with patch('grid_trading_manager.logger.error') as error:
+            with self.blocked_reorder(order, '_submit_grid_order_outside_lock'):
+                self.manager.stop_grid_session(self.session.id, 'manual')
+        error.assert_called_once()
+        self.assertEqual(self.manager.pending_grid_orders['ORDER_NEW']['status'], 'cancel_failed')
+        self.assertEqual(self.db.get_grid_order('ORDER_NEW')['status'], 'cancel_failed')
+        self.assertEqual(self.session.status, 'stopping')
+
+    def test_stop_during_failed_submission_completes(self):
+        order, _, submit = self.prepare_cancel()
+        submit.side_effect = RuntimeError('下单失败')
+        with patch('grid_trading_manager.logger.error'):
+            with self.blocked_reorder(order, '_submit_grid_order_outside_lock'):
+                self.manager.stop_grid_session(self.session.id, 'manual')
+        self.assertFalse(self.manager.pending_grid_orders)
+        self.assertFalse(self.manager.submitting_grid_orders)
+        self.assertEqual(self.db.get_grid_session(self.session.id)['status'], 'stopped')
 
 
 class TestGridRealLedger(GridLifecycleLedgerBase):
