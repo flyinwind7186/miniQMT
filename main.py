@@ -420,9 +420,9 @@ def heartbeat_logger():
             sync_duration = sync_status['duration_seconds']
             sync_age_text = f"{sync_age:.2f}" if sync_age is not None else "None"
             sync_duration_text = f"{sync_duration:.2f}" if sync_duration is not None else "None"
-            logger.info(f"   持久化: 最近成功距今={sync_age_text}秒，"
-                        f"最近同步耗时={sync_duration_text}秒，"
-                        f"最近委托超时处理延迟={position_manager.last_order_timeout_delay_seconds:.2f}秒")
+            logger.info(f"   持久化: 距今={sync_age_text}秒，"
+                        f"耗时={sync_duration_text}秒，"
+                        f"延迟={position_manager.last_order_timeout_delay_seconds:.2f}秒")
             logger.info(f"   {market_health_str}")
             logger.info("=" * 50)
 
