@@ -193,7 +193,7 @@ class TradingExecutor:
             try:
                 tracking_info = dict(signal_info)
                 tracking_info.setdefault('order_side', str(side).upper())
-                tracking_info.setdefault('volume', volume)
+                tracking_info['volume'] = volume
                 tracking_info.setdefault('current_price', price)
                 track_order(
                     stock_code=stock_code,
@@ -1888,7 +1888,7 @@ class TradingExecutor:
                                     try:
                                         tracking_info = dict(signal_info)
                                         tracking_info.setdefault('order_side', 'BUY')
-                                        tracking_info.setdefault('volume', volume)
+                                        tracking_info['volume'] = volume
                                         tracking_info.setdefault('current_price', price)
                                         self.position_manager.track_order(
                                             stock_code=formatted_stock_code,
@@ -2216,7 +2216,7 @@ class TradingExecutor:
                                     try:
                                         tracking_info = dict(signal_info)
                                         tracking_info.setdefault('order_side', 'SELL')
-                                        tracking_info.setdefault('volume', volume)
+                                        tracking_info['volume'] = volume
                                         tracking_info.setdefault('current_price', price)
                                         self.position_manager.track_order(
                                             stock_code=formatted_stock_code,

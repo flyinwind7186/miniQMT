@@ -8,7 +8,7 @@
      - register_trade_callback 正确挂载
 
   2. pending_orders 生命周期（callback 路径）
-     - 成交回报立即移除匹配委托
+     - 部分成交保留跟踪，累计全部成交才移除匹配委托
      - 按 order_id 精确匹配，不误删其他股票
      - 未知 order_id 不影响现有跟踪
 
@@ -377,8 +377,8 @@ class TestTraderCallback(TestBase):
 
     def test_b2_trade_callback_matches_by_order_id_only(self):
         """成交回报只移除匹配 order_id 的记录，不影响其他股票"""
-        self.pm.track_order("301560", 940572673, "take_profit_half", {})
-        self.pm.track_order("002441", 940572999, "take_profit_half", {})
+        self.pm.track_order("301560", 940572673, "take_profit_half", {"volume": 600})
+        self.pm.track_order("002441", 940572999, "take_profit_half", {"volume": 600})
 
         trade = _FakeTrade(order_id=940572673, stock_code="301560.SZ")
         self.pm._on_trade_callback(trade)
@@ -398,9 +398,9 @@ class TestTraderCallback(TestBase):
 
     def test_b4_multiple_stocks_only_matched_removed(self):
         """三只股票跟踪，只有成交的那只被移除"""
-        self.pm.track_order("301560", 1001, "take_profit_half", {})
-        self.pm.track_order("002441", 1002, "take_profit_half", {})
-        self.pm.track_order("600036", 1003, "take_profit_half", {})
+        self.pm.track_order("301560", 1001, "take_profit_half", {"volume": 600})
+        self.pm.track_order("002441", 1002, "take_profit_half", {"volume": 600})
+        self.pm.track_order("600036", 1003, "take_profit_half", {"volume": 600})
 
         trade = _FakeTrade(order_id=1002, stock_code="002441.SZ")
         self.pm._on_trade_callback(trade)
@@ -408,6 +408,282 @@ class TestTraderCallback(TestBase):
         self.assertIn("301560", self.pm.pending_orders)
         self.assertNotIn("002441", self.pm.pending_orders)
         self.assertIn("600036", self.pm.pending_orders)
+
+    def test_b5_partial_fill_keeps_tracking_and_blocks_duplicate_signal(self):
+        """首笔部分成交后继续跟踪，阻断同股重复信号。"""
+        self.pm.track_order("301560", 1001, "stop_loss", {"volume": 14300})
+        trade = _FakeTrade(1001, "301560.SZ", traded_volume=1900, traded_id="PART_1")
+        with patch.object(self.pm, "_record_trade_after_confirmation") as record, \
+                patch.object(self.pm, "_pause_grid_after_full_exit") as pause, \
+                patch.object(self.pm, "_request_immediate_position_refresh"):
+            self.pm._on_trade_callback(trade)
+        self.assertIn("301560", self.pm.pending_orders)
+        self.assertEqual(self.pm.pending_orders["301560"]["filled_volume"], 1900)
+        self.assertEqual(self.pm.validate_trading_signal(
+            "301560", "stop_loss", {}, return_reason=True),
+            (False, "blocked", "pending_order"))
+        record.assert_called_once()
+        pause.assert_not_called()
+
+    def test_b6_all_partial_fills_are_recorded_before_tracking_ends(self):
+        """复现实盘五笔成交，累计达到委托量后才结束跟踪。"""
+        self.pm.track_order("301560", 1001, "stop_loss", {"volume": 14300})
+        with patch.object(self.pm, "_record_trade_after_confirmation") as record, \
+                patch.object(self.pm, "_record_external_trade_after_callback") as external, \
+                patch.object(self.pm, "_pause_grid_after_full_exit") as pause, \
+                patch.object(self.pm, "_request_immediate_position_refresh"):
+            for index, volume in enumerate((1900, 1000, 10000, 400, 1000)):
+                self.pm._on_trade_callback(_FakeTrade(
+                    1001, "301560.SZ", traded_volume=volume,
+                    traded_id=f"PART_{index}"))
+                self.assertEqual("301560" in self.pm.pending_orders, index < 4)
+            self.assertEqual(record.call_count, 5)
+            external.assert_not_called()
+            pause.assert_called_once_with("301560", "stop_loss")
+
+    def test_b7_duplicate_fill_does_not_complete_order_early(self):
+        """重复推送同一成交编号不能重复累计成交数量。"""
+        self.pm.track_order("301560", 1001, "stop_loss", {"volume": 600})
+        first = _FakeTrade(1001, "301560.SZ", traded_volume=200, traded_id="PART_1")
+        with patch.object(self.pm, "_record_trade_after_confirmation"), \
+                patch.object(self.pm, "_request_immediate_position_refresh"):
+            self.pm._on_trade_callback(first)
+            self.pm._on_trade_callback(first)
+            self.pm._on_trade_callback(first)
+            self.assertEqual(self.pm.pending_orders["301560"]["filled_volume"], 200)
+            self.pm._on_trade_callback(_FakeTrade(
+                1001, "301560.SZ", traded_volume=400, traded_id="PART_2"))
+        self.assertNotIn("301560", self.pm.pending_orders)
+
+    def test_b8_identical_price_and_volume_with_distinct_ids_count_separately(self):
+        """同价同量但成交编号不同的两笔成交必须分别累计。"""
+        self.pm.track_order("301560", 1001, "stop_loss", {"volume": 400})
+        with patch.object(self.pm, "_record_trade_after_confirmation"), \
+                patch.object(self.pm, "_request_immediate_position_refresh"):
+            for deal_id in ("PART_1", "PART_2"):
+                self.pm._on_trade_callback(_FakeTrade(
+                    1001, "301560.SZ", traded_volume=200, traded_id=deal_id))
+        self.assertNotIn("301560", self.pm.pending_orders)
+
+    def test_b9_missing_volume_or_deal_id_waits_for_terminal_confirmation(self):
+        """缺少委托量或成交编号时保守保留跟踪，由终态查询兜底。"""
+        with patch.object(self.pm, "_record_trade_after_confirmation"), \
+                patch.object(self.pm, "_request_immediate_position_refresh"):
+            for signal_info, deal_id in (({}, "PART_1"), ({"volume": 600}, "")):
+                self.pm.track_order("301560", 1001, "stop_loss", signal_info)
+                trade = _FakeTrade(1001, "301560.SZ")
+                trade.traded_id = deal_id
+                self.pm._on_trade_callback(trade)
+                self.assertIn("301560", self.pm.pending_orders)
+                with patch.object(self.pm, "_query_order_status", return_value=56):
+                    self.pm._handle_timeout_order(dict(self.pm.pending_orders["301560"]))
+                self.assertNotIn("301560", self.pm.pending_orders)
+
+    def test_b10_take_profit_half_is_marked_only_after_full_fill(self):
+        """首次止盈分笔成交时，达到目标数量后才确认止盈状态。"""
+        self.pm.track_order("301560", 1001, "take_profit_half", {"volume": 600})
+        with patch.object(self.pm, "mark_profit_triggered", return_value=True) as mark, \
+                patch.object(self.pm, "_sync_profit_triggered_to_sqlite"), \
+                patch.object(self.pm, "_record_trade_after_confirmation"), \
+                patch.object(self.pm, "_request_immediate_position_refresh"):
+            self.pm._on_trade_callback(_FakeTrade(
+                1001, "301560.SZ", traded_volume=200, traded_id="PART_1"))
+            mark.assert_not_called()
+            self.pm._on_trade_callback(_FakeTrade(
+                1001, "301560.SZ", traded_volume=400, traded_id="PART_2"))
+            mark.assert_called_once_with("301560")
+
+    def test_b11_partial_fill_preserves_cancel_requested_status(self):
+        """撤单等待期间继续成交，不得清掉撤单等待状态或重挂标记。"""
+        self.pm.track_order("301560", 1001, "stop_loss", {"volume": 600})
+        self.pm.pending_orders["301560"].update(
+            status="cancel_requested", reorder_after_cancel=True)
+        with patch.object(self.pm, "_record_trade_after_confirmation"), \
+                patch.object(self.pm, "_request_immediate_position_refresh"):
+            self.pm._on_trade_callback(_FakeTrade(
+                1001, "301560.SZ", traded_volume=200, traded_id="PART_1"))
+        pending = self.pm.pending_orders["301560"]
+        self.assertEqual(pending["status"], "cancel_requested")
+        self.assertTrue(pending["reorder_after_cancel"])
+
+    def test_b12_partial_fill_timeout_still_cancels_and_reorders_only_remaining(self):
+        """部分成交后超时仍可撤单，确认撤单后仅重挂剩余数量。"""
+        self.pm.track_order("301560", 1001, "stop_loss", {"volume": 600})
+        with patch.object(self.pm, "_record_trade_after_confirmation"), \
+                patch.object(self.pm, "_request_immediate_position_refresh"):
+            self.pm._on_trade_callback(_FakeTrade(
+                1001, "301560.SZ", traded_volume=200, traded_id="PART_1"))
+        with patch.object(config, "ENABLE_SIMULATION_MODE", False), \
+                patch.object(config, "ENABLE_PENDING_ORDER_AUTO_CANCEL", True), \
+                patch.object(config, "PENDING_ORDER_AUTO_REORDER", True), \
+                patch("config.is_continuous_trade_time", return_value=True), \
+                patch("config.get_continuous_trading_seconds", return_value=60), \
+                patch.object(self.pm, "_query_order_status", return_value=55), \
+                patch.object(self.pm, "_cancel_order", return_value=True) as cancel, \
+                patch.object(self.pm, "_reorder_after_cancel") as reorder:
+            self.pm.last_order_check_time = 0
+            self.pm.check_pending_orders_timeout()
+            cancel.assert_called_once_with("301560", 1001)
+            self.assertEqual(self.pm.pending_orders["301560"]["status"], "cancel_requested")
+            self.pm._confirm_canceled_order("301560", 1001, "测试撤单")
+            self.assertEqual(reorder.call_args.args[2]["volume"], 400)
+
+    def test_b13_both_cancel_terminal_states_use_broker_cumulative_fill(self):
+        """部撤和已撤回报均扣除券商累计成交量，覆盖迟到的成交推送。"""
+        for status in (53, 54):
+            with self.subTest(status=status):
+                self.pm.track_order("301560", 1001, "stop_loss", {"volume": 1000})
+                self.pm.pending_orders["301560"].update(
+                    filled_volume=200, reorder_after_cancel=True, status="cancel_requested")
+                with patch.object(self.pm, "_reorder_after_cancel") as reorder, \
+                        patch.object(self.pm, "_request_immediate_position_refresh"):
+                    self.pm._on_order_callback(_FakeOrder(
+                        "301560.SZ", status, order_id=1001,
+                        order_volume=1000, traded_volume=300))
+                    self.assertTrue(self.wait_for_condition(lambda: reorder.called))
+                    self.assertEqual(reorder.call_args.args[2]["volume"], 700)
+
+    def test_b14_query_cancel_uses_broker_fill_when_trade_push_is_missing(self):
+        """撤单终态查询发现漏推的成交量时，重挂量也不能包含已成交部分。"""
+        self.pm.track_order("301560", 1001, "stop_loss", {"volume": 1000})
+        self.pm.pending_orders["301560"].update(
+            reorder_after_cancel=True, status="cancel_requested")
+        self.pm.qmt_connected = True
+        self.pm.qmt_trader = MagicMock()
+        self.pm.qmt_trader.xt_trader.query_stock_order.return_value = _FakeOrder(
+            "301560.SZ", 53, order_id=1001, order_volume=1000, traded_volume=300)
+        with patch.object(self.pm, "_reorder_after_cancel") as reorder:
+            self.pm._handle_timeout_order(dict(self.pm.pending_orders["301560"]))
+        self.assertEqual(reorder.call_args.args[2]["volume"], 700)
+
+    def test_b15_terminal_order_before_deals_does_not_drop_later_fills(self):
+        """已成状态先于分笔成交到达时，流水仍逐笔处理且不丢失策略归属。"""
+        self.pm.track_order("301560", 1001, "stop_loss", {"volume": 600})
+        with patch.object(self.pm, "_record_trade_after_confirmation") as record, \
+                patch.object(self.pm, "_record_external_trade_after_callback") as external, \
+                patch.object(self.pm, "_request_immediate_position_refresh"):
+            self.pm._on_order_callback(_FakeOrder(
+                "301560.SZ", 56, order_id=1001, order_volume=600, traded_volume=600))
+            self.assertIn("301560", self.pm.pending_orders)
+            for volume, deal_id in ((200, "PART_1"), (400, "PART_2")):
+                self.pm._on_trade_callback(_FakeTrade(
+                    1001, "301560.SZ", traded_volume=volume, traded_id=deal_id))
+            self.assertEqual(record.call_count, 2)
+            external.assert_not_called()
+        self.assertNotIn("301560", self.pm.pending_orders)
+
+    def test_b16_concurrent_duplicate_partial_callbacks_do_not_end_tracking(self):
+        """同一委托并发重复推送时，累计数量仍按唯一成交编号计算。"""
+        self.pm.track_order("301560", 1001, "stop_loss", {"volume": 1000})
+        trade = _FakeTrade(1001, "301560.SZ", traded_volume=100, traded_id="PART_1")
+        with patch.object(self.pm, "_record_trade_after_confirmation"), \
+                patch.object(self.pm, "_request_immediate_position_refresh"):
+            threads = [threading.Thread(target=self.pm._on_trade_callback, args=(trade,))
+                       for _ in range(10)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=3)
+                self.assertFalse(thread.is_alive())
+        self.assertEqual(self.pm.pending_orders["301560"]["filled_volume"], 100)
+
+    def test_b17_partial_fills_write_real_ledger_once_with_original_strategy(self):
+        """分批与重复推送经过真实记账逻辑，流水不重复且保持原策略。"""
+        executor = self._make_live_executor()
+        self.addCleanup(executor.conn.close)
+        self.pm.track_order("301560", 1001, "stop_loss", {"volume": 600})
+        first = _FakeTrade(1001, "301560.SZ", traded_volume=200, traded_id="PART_1")
+        with patch.object(config, "ENABLE_SIMULATION_MODE", False), \
+                patch("trading_executor.get_trading_executor", return_value=executor), \
+                patch.object(self.pm, "_request_immediate_position_refresh"):
+            self.pm._on_trade_callback(first)
+            self.pm._on_trade_callback(first)
+            self.pm._on_trade_callback(_FakeTrade(
+                1001, "301560.SZ", traded_volume=400, traded_id="PART_2"))
+        rows = executor.conn.execute(
+            "SELECT volume, strategy FROM trade_records ORDER BY id").fetchall()
+        self.assertEqual(rows, [(200, "stop_loss"), (400, "stop_loss")])
+        self.assertNotIn("301560", self.pm.pending_orders)
+
+    def test_b18_tracking_uses_actual_order_volume_instead_of_signal_snapshot(self):
+        """买卖委托及迟到映射均以实际下单量跟踪，避免误用旧信号的数量。"""
+        for side in ("BUY", "SELL", "LATE_SELL"):
+            with self.subTest(side=side):
+                executor = self._make_orderable_executor()
+                self.addCleanup(executor.conn.close)
+                signal_info = {"volume": 1000, "current_price": 44.09}
+                with patch.object(config, "ENABLE_SIMULATION_MODE", False), \
+                        patch.object(config, "ENABLE_ALLOW_BUY", True), \
+                        patch.object(config, "ENABLE_ALLOW_SELL", True), \
+                        patch("config.is_trade_time", return_value=True):
+                    if side == "LATE_SELL":
+                        executor._register_resolved_unknown_order_submission(
+                            "301560.SZ", "SELL", 1001, {
+                                "volume": 600, "price": 44.09, "strategy": "stop_loss",
+                                "signal_type": "stop_loss", "signal_info": signal_info})
+                    else:
+                        submit = executor.buy_stock if side == "BUY" else executor.sell_stock
+                        self.assertTrue(submit(
+                            "301560.SZ", volume=600, price=44.09,
+                            strategy="add_position" if side == "BUY" else "stop_loss",
+                            signal_type="add_position" if side == "BUY" else "stop_loss",
+                            signal_info=signal_info))
+                self.assertEqual(executor.position_manager.track_order.call_args.kwargs[
+                    "signal_info"]["volume"], 600)
+                self.assertEqual(signal_info["volume"], 1000)
+
+    def test_b19_dataframe_cancel_query_preserves_broker_cumulative_volume(self):
+        """通用委托列表查询同样保留已成交量，部撤后仅重挂余量。"""
+        self.pm.track_order("301560", 1001, "stop_loss", {"volume": 1000})
+        self.pm.pending_orders["301560"].update(
+            reorder_after_cancel=True, status="cancel_requested")
+        self.pm.qmt_connected = True
+        self.pm.qmt_trader = MagicMock()
+        self.pm.qmt_trader.xt_trader = None
+        self.pm.qmt_trader.query_stock_orders.return_value = pd.DataFrame([{
+            "订单编号": "1001", "证券代码": "301560.SZ",
+            "委托状态": 53, "成交数量": 300}])
+        with patch.object(self.pm, "_reorder_after_cancel") as reorder:
+            self.pm._handle_timeout_order(dict(self.pm.pending_orders["301560"]))
+        self.assertEqual(reorder.call_args.args[2]["volume"], 700)
+
+    def test_b20_partial_stop_loss_blocks_grid_until_order_is_finished(self):
+        """止损余单挂单期间，即使价格回升也不得由监控线程执行网格买入。"""
+        self.pm.track_order("301560", 1001, "stop_loss", {"volume": 600})
+        with patch.object(self.pm, "_record_trade_after_confirmation"), \
+                patch.object(self.pm, "_request_immediate_position_refresh"):
+            self.pm._on_trade_callback(_FakeTrade(
+                1001, "301560.SZ", traded_volume=200, traded_id="PART_1"))
+        positions = pd.DataFrame([{
+            "stock_code": "301560", "volume": 400, "available": 0,
+            "cost_price": 44, "highest_price": 50}])
+        self.pm.grid_manager = MagicMock()
+        self.pm.grid_manager.check_grid_signals.return_value = {"signal_type": "BUY"}
+        self.pm.data_manager = MagicMock()
+        self.pm.data_manager.get_latest_data.return_value = {"lastPrice": 44.5}
+        self.pm.data_manager.is_quote_tradable.return_value = True
+        self.pm.last_update_highest_time = time.time()
+        def stop_after_iteration(_seconds):
+            self.pm.stop_flag = True
+        with patch.object(config, "ENABLE_SIMULATION_MODE", True), \
+                patch.object(config, "ENABLE_GRID_TRADING", True), \
+                patch("config.is_trade_time", return_value=True), \
+                patch("config.is_global_monitor_enabled", return_value=True), \
+                patch.object(self.pm, "get_all_positions", return_value=positions), \
+                patch.object(self.pm, "_maybe_reconcile_missing_trades"), \
+                patch.object(self.pm, "check_pending_orders_timeout"), \
+                patch("position_manager.run_with_timeout",
+                      side_effect=lambda function, _timeout: function()), \
+                patch("position_manager.time.sleep", side_effect=stop_after_iteration):
+            self.pm.stop_flag = False
+            self.pm._position_monitor_loop()
+            self.pm.grid_manager.check_grid_signals.assert_not_called()
+            self.pm.grid_manager.execute_grid_trade.assert_not_called()
+            with self.pm.pending_orders_lock:
+                self.pm.pending_orders.clear()
+            self.pm.stop_flag = False
+            self.pm._position_monitor_loop()
+            self.pm.grid_manager.execute_grid_trade.assert_called_once()
 
     # ===================================================================
     # Group C: profit_triggered 立即同步
@@ -502,7 +778,8 @@ class TestTraderCallback(TestBase):
         try:
             config.ENABLE_PAUSE_GRID_AFTER_TAKE_PROFIT_FULL = True
             with patch.object(self.pm, "_request_immediate_position_refresh"):
-                trade = _FakeTrade(order_id=order_id, stock_code=f"{stock_code}.SZ")
+                trade = _FakeTrade(order_id=order_id, stock_code=f"{stock_code}.SZ",
+                                   traded_volume=700)
                 self.pm._on_trade_callback(trade)
         finally:
             config.ENABLE_PAUSE_GRID_AFTER_TAKE_PROFIT_FULL = old_flag
@@ -523,7 +800,8 @@ class TestTraderCallback(TestBase):
         try:
             config.ENABLE_PAUSE_GRID_AFTER_TAKE_PROFIT_FULL = False
             with patch.object(self.pm, "_request_immediate_position_refresh"):
-                trade = _FakeTrade(order_id=order_id, stock_code=f"{stock_code}.SZ")
+                trade = _FakeTrade(order_id=order_id, stock_code=f"{stock_code}.SZ",
+                                   traded_volume=700)
                 self.pm._on_trade_callback(trade)
         finally:
             config.ENABLE_PAUSE_GRID_AFTER_TAKE_PROFIT_FULL = old_flag
@@ -1293,7 +1571,7 @@ class TestTraderCallback(TestBase):
     def test_f2_concurrent_callbacks_thread_safe(self):
         """并发成交回报不应导致 pending_orders 数据竞争"""
         for i in range(5):
-            self.pm.track_order(f"00000{i}", i, "take_profit_half", {})
+            self.pm.track_order(f"00000{i}", i, "take_profit_half", {"volume": 600})
 
         errors = []
 

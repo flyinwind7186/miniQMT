@@ -5167,7 +5167,8 @@ class PositionManager:
                         self._detect_and_enqueue_dynamic_signal(stock_code, current_price)
 
                         # 网格交易独立检测并直接执行，不进入 latest_signals/strategy 动态止盈链路。
-                        if self.grid_manager and config.ENABLE_GRID_TRADING:
+                        if (self.grid_manager and config.ENABLE_GRID_TRADING
+                                and not self._has_tracked_pending_order(stock_code)):
                             try:
                                 grid_signal = self.grid_manager.check_grid_signals(stock_code, current_price)
                                 if grid_signal:
@@ -5223,8 +5224,8 @@ class PositionManager:
 
     def _on_trade_callback(self, trade):
         """
-        P0修复: QMT成交回报回调 — 成交时立即从pending_orders移除跟踪，
-        防止超时逻辑对已成交委托发起撤单。
+        QMT成交回报回调：逐笔记账，累计全部成交后才移除委托跟踪，
+        部分成交继续保留超时管理和同股防重保护。
         同时立即同步 profit_triggered 到 SQLite（P1修复）。
         """
         try:
@@ -5268,7 +5269,8 @@ class PositionManager:
                 order,
                 ['order_id', 'm_strOrderID', '订单编号', 'order_sysid', 'm_strOrderSysID', '系统订单号']
             )
-            if stock_code and order_status == 54:
+            self._update_pending_order_broker_volume(stock_code, order_id, order)
+            if stock_code and order_status in (53, 54):
                 self._confirm_canceled_order(stock_code, order_id, "撤单回报", defer_reorder=True)
 
             if stock_code and order_status not in [48, 49, 50, 51, 52, 55]:
@@ -5395,6 +5397,24 @@ class PositionManager:
                 return key
         return None
 
+    def _update_pending_order_broker_volume(self, stock_code, order_id, order):
+        """保存券商累计成交量，供撤单后扣除已成交部分，回调内不查询券商。"""
+        if not hasattr(self, 'pending_orders_lock'):
+            return
+        try:
+            volume = int(self._field_any(
+                order, ['traded_volume', 'm_nVolumeTraded', '成交数量']))
+        except (TypeError, ValueError, OverflowError):
+            return
+        if volume < 0:
+            return
+        with self.pending_orders_lock:
+            key = self._find_pending_order_key_locked(stock_code, order_id)
+            if key:
+                pending = self.pending_orders[key]
+                pending['broker_filled_volume'] = max(
+                    pending.get('broker_filled_volume', 0), volume)
+
     def _find_cancel_requested_order_key_locked(self, stock_code):
         stock_code_base = self._base_stock_code(stock_code)
         for key, info in self.pending_orders.items():
@@ -5469,16 +5489,46 @@ class PositionManager:
             logger.warning(f"[网格] {stock_code} {reason} 成交后暂停网格会话失败: {e}")
 
     def _confirm_filled_order(self, stock_code, order_id, source, trade=None, order_info=None):
-        """统一处理真实成交确认：清 pending、落状态、补流水、请求持仓快刷。"""
+        """逐笔记账；累计全成或查询确认全成后，才清跟踪并更新策略状态。"""
         stock_code_base = self._base_stock_code(stock_code)
         pending_snapshot = dict(order_info or {})
         matched_key = None
+        fully_filled = trade is None
 
         with self.pending_orders_lock:
             matched_key = self._find_pending_order_key_locked(stock_code_base, order_id)
             if matched_key:
-                pending_snapshot = dict(self.pending_orders.get(matched_key) or {})
-                del self.pending_orders[matched_key]
+                pending = self.pending_orders[matched_key]
+                if trade is not None:
+                    deal_id = str(self._field_any(
+                        trade, ['traded_id', 'm_strTradeID', '成交编号'], '') or '').strip()
+                    try:
+                        volume = int(self._field_any(
+                            trade, ['traded_volume', 'm_nVolume', '成交数量'], 0))
+                        expected_volume = int((pending.get('signal_info') or {}).get('volume', 0))
+                    except (TypeError, ValueError, OverflowError):
+                        volume = expected_volume = 0
+                    seen = pending.setdefault('filled_trade_ids', set())
+                    if deal_id and volume > 0 and deal_id not in seen:
+                        seen.add(deal_id)
+                        pending['filled_volume'] = pending.get('filled_volume', 0) + volume
+                    # 无可靠成交编号或委托量时保留跟踪，由已成状态查询兜底。
+                    fully_filled = (
+                        expected_volume > 0 and
+                        pending.get('filled_volume', 0) >= expected_volume
+                    )
+                pending_snapshot = dict(pending)
+                if fully_filled:
+                    del self.pending_orders[matched_key]
+
+        if matched_key and not fully_filled:
+            logger.info(
+                f"[{source}] {stock_code_base} 部分成交，保留委托跟踪 "
+                f"委托号={order_id}, 累计成交={pending_snapshot.get('filled_volume', 0)}"
+            )
+            self._record_trade_after_confirmation(order_id, pending_snapshot, trade=trade)
+            self._request_immediate_position_refresh(stock_code_base, source)
+            return True
 
         if matched_key or order_info:
             signal_type = pending_snapshot.get('signal_type', '')
@@ -5508,7 +5558,7 @@ class PositionManager:
         return bool(matched_key or order_info)
 
     def _confirm_canceled_order(self, stock_code, order_id, source, defer_reorder=False):
-        """统一处理撤单完成确认：收到 54=已撤 后再清理旧委托，并按配置重挂。"""
+        """收到部撤或已撤终态后清理旧委托，按配置仅重挂未成交余量。"""
         stock_code_base = self._base_stock_code(stock_code)
         pending_snapshot = {}
         matched_key = None
@@ -5533,8 +5583,15 @@ class PositionManager:
             return False
 
         signal_type = pending_snapshot.get('signal_type', '')
-        signal_info = pending_snapshot.get('signal_info', {})
+        signal_info = dict(pending_snapshot.get('signal_info') or {})
         should_reorder = bool(pending_snapshot.get('reorder_after_cancel', False))
+        if should_reorder:
+            filled_volume = max(pending_snapshot.get('filled_volume', 0),
+                                pending_snapshot.get('broker_filled_volume', 0))
+            try:
+                signal_info['volume'] = max(0, int(signal_info.get('volume', 0)) - filled_volume)
+            except (TypeError, ValueError, OverflowError):
+                signal_info['volume'] = 0
 
         logger.info(
             f"✅ [{source}] {stock_code_base} 委托已撤(委托号={order_id})，"
@@ -5704,7 +5761,7 @@ class PositionManager:
                 )
                 return
 
-            if order_status == 54:  # 54=已撤
+            if order_status in (53, 54):  # 53=部撤，54=已撤
                 self._confirm_canceled_order(stock_code, order_id, "撤单状态查询")
                 return
 
@@ -5814,6 +5871,7 @@ class PositionManager:
                 if order:
                     status = self._field_any(order, ['order_status', 'm_nOrderStatus', '委托状态'])
                     if status is not None:
+                        self._update_pending_order_broker_volume(stock_code, original_order_id, order)
                         return status
 
             orders = None
@@ -5833,6 +5891,7 @@ class PositionManager:
                     continue
                 if order_stock and self._base_stock_code(order_stock) != stock_code_base:
                     continue
+                self._update_pending_order_broker_volume(stock_code, original_order_id, order)
                 return self._field_any(order, ['order_status', 'm_nOrderStatus', '委托状态'])
 
             return None
