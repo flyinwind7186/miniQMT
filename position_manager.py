@@ -5272,6 +5272,8 @@ class PositionManager:
             self._update_pending_order_broker_volume(stock_code, order_id, order)
             if stock_code and order_status in (53, 54):
                 self._confirm_canceled_order(stock_code, order_id, "撤单回报", defer_reorder=True)
+            elif stock_code and order_status == 57:
+                self._confirm_rejected_order(stock_code, order_id, "废单回报", defer_reorder=True)
 
             if stock_code and order_status not in [48, 49, 50, 51, 52, 55]:
                 self._request_immediate_position_refresh(stock_code, f"委托终态({order_status})")
@@ -5631,6 +5633,84 @@ class PositionManager:
         else:
             logger.info(f"ℹ️ {stock_code_base} 委托已撤，未处于系统自动重挂流程，不自动重挂")
 
+        return True
+
+    def _confirm_rejected_order(self, stock_code, order_id, source, defer_reorder=False):
+        """废单(57)终态：清理跟踪，并按配置重挂一次未成交余量。
+
+        与撤单不同，废单是交易所/柜台拒绝，原委托从未进入撮合，因此允许无条件
+        重试一次；重试次数由 signal_info['reject_retry_count'] 传递并限制。
+        """
+        if not hasattr(self, 'pending_orders_lock'):
+            return False
+        stock_code_base = self._base_stock_code(stock_code)
+        pending_snapshot = {}
+        matched_key = None
+
+        with self.pending_orders_lock:
+            matched_key = self._find_pending_order_key_locked(stock_code_base, order_id)
+            if not matched_key:
+                return False
+            pending_entry = self.pending_orders[matched_key]
+            if pending_entry.get('status') == 'reordering':
+                return True
+
+            pending_snapshot = dict(pending_entry)
+            signal_info = dict(pending_snapshot.get('signal_info') or {})
+            try:
+                retry_count = int(signal_info.get('reject_retry_count') or 0)
+            except (TypeError, ValueError):
+                retry_count = 0
+
+            if not getattr(config, 'PENDING_ORDER_AUTO_REORDER', True):
+                logger.warning(
+                    f"⚠️ [REORDER] {stock_code_base} 委托废单(委托号={order_id})，"
+                    f"PENDING_ORDER_AUTO_REORDER=False，不自动重挂，请人工确认是否需要补单"
+                )
+                del self.pending_orders[matched_key]
+                return True
+            if retry_count >= 1:
+                logger.error(
+                    f"❌ [REORDER] {stock_code_base} 废单后重挂已达上限 委托号={order_id}，"
+                    f"请人工确认是否需要补单"
+                )
+                del self.pending_orders[matched_key]
+                return True
+
+            filled_volume = max(pending_snapshot.get('filled_volume', 0) or 0,
+                                pending_snapshot.get('broker_filled_volume', 0) or 0)
+            try:
+                signal_info['volume'] = max(0, int(signal_info.get('volume', 0)) - filled_volume)
+            except (TypeError, ValueError, OverflowError):
+                signal_info['volume'] = 0
+            signal_info['reject_retry_count'] = retry_count + 1
+            pending_entry['status'] = 'reordering'
+
+        signal_type = pending_snapshot.get('signal_type', '')
+        logger.warning(
+            f"⚠️ [{source}] {stock_code_base} 委托废单(委托号={order_id}, 信号={signal_type})，"
+            f"按配置重挂一次 剩余数量={signal_info.get('volume')}"
+        )
+
+        def _reorder():
+            try:
+                self._reorder_after_cancel(stock_code_base, signal_type, signal_info)
+            finally:
+                with self.pending_orders_lock:
+                    if self.pending_orders.get(matched_key) is pending_entry:
+                        self.pending_orders.pop(matched_key, None)
+
+        if defer_reorder:
+            try:
+                threading.Thread(target=_reorder, name=f"OrderReorder-{stock_code_base}",
+                                 daemon=True).start()
+            except Exception:
+                with self.pending_orders_lock:
+                    if self.pending_orders.get(matched_key) is pending_entry:
+                        pending_entry['status'] = pending_snapshot.get('status', 'submitted')
+                raise
+        else:
+            _reorder()
         return True
 
     def _get_pending_order_timeout_minutes(self, signal_type):

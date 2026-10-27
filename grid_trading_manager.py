@@ -1171,6 +1171,45 @@ class GridTradingManager:
         max_attempts = self._safe_int(getattr(config, 'GRID_PENDING_ORDER_REORDER_MAX_ATTEMPTS', 1), 1)
         return self._safe_int(pending.get('reorder_count'), 0) < max_attempts
 
+    def _clear_grid_cooldown_unlocked(self, session_id, side):
+        """废单未成交时清除该方向的提交冷却。
+
+        冷却在提交时即写入（_execute_grid_buy/_execute_grid_sell），但废单并未产生
+        成交；若不清理，网格会照常白等 GRID_BUY/SELL_COOLDOWN 秒才允许下一次尝试。
+        """
+        try:
+            sid = int(session_id)
+        except (TypeError, ValueError):
+            return
+        if str(side or '').upper() == 'BUY':
+            self.last_buy_times.pop(sid, None)
+        else:
+            self.last_sell_times.pop(sid, None)
+            self.last_sell_prices.pop(sid, None)
+
+    def _build_reorder_snapshot_from_db_order(self, db_order: dict) -> dict:
+        """用网格委托库记录重建重挂快照。
+
+        场景：已撤(54) 先到达并清掉了内存 pending，废单(57) 随后才到，
+        此时只能靠库内的原始信号补一次重挂。
+        """
+        try:
+            signal = json.loads(db_order.get('raw_signal') or '{}')
+        except (TypeError, ValueError):
+            signal = {}
+        if not isinstance(signal, dict):
+            signal = {}
+        return {
+            'order_id': str(db_order.get('order_id') or ''),
+            'session_id': db_order.get('session_id'),
+            'stock_code': db_order.get('stock_code'),
+            'side': db_order.get('side'),
+            'signal': signal,
+            'expected_price': float(db_order.get('expected_price') or 0),
+            'filled_volume': self._safe_int(db_order.get('filled_volume'), 0),
+            'reorder_count': self._safe_int(db_order.get('reorder_count'), 0),
+        }
+
     def _mark_grid_order_cancel_requested_unlocked(self, order_id: str, pending: dict,
                                                    broker_status=None, reason: str = "timeout") -> None:
         now_text = datetime.now().isoformat()
@@ -2811,16 +2850,46 @@ class GridTradingManager:
         with self.lock:
             pending = self.pending_grid_orders.get(order_id)
             if not pending:
-                if hasattr(self.db, 'get_grid_order') and self.db.get_grid_order(order_id):
-                    try:
-                        self.db.update_grid_order(order_id, {
-                            'status': terminal_status_map[status],
-                            'last_error': f'order terminal status {status}'
-                        })
-                    except Exception as db_err:
-                        logger.warning(f"[网格] 更新历史委托状态失败 委托号={order_id}, err={db_err}")
-                    return True
-                return False
+                db_order = None
+                try:
+                    if hasattr(self.db, 'get_grid_order'):
+                        db_order = self.db.get_grid_order(order_id)
+                except Exception as db_err:
+                    logger.warning(f"[网格] 读取历史委托失败 委托号={order_id}, err={db_err}")
+                if not db_order:
+                    return False
+                # 同一终态会被推送两次（QMT 重复回报），仅首次生效可避免重复重挂
+                already_terminal = str(db_order.get('status') or '') == terminal_status_map[status]
+                try:
+                    self.db.update_grid_order(order_id, {
+                        'status': terminal_status_map[status],
+                        'last_error': f'order terminal status {status}'
+                    })
+                except Exception as db_err:
+                    logger.warning(f"[网格] 更新历史委托状态失败 委托号={order_id}, err={db_err}")
+                if status == 57 and not already_terminal:
+                    # 废单未成交：清掉提交时写入的冷却，避免白等 GRID_*_COOLDOWN 秒
+                    self._clear_grid_cooldown_unlocked(
+                        db_order.get('session_id'), db_order.get('side'))
+                    if (self._safe_int(db_order.get('filled_volume'), 0) == 0
+                            and not self._safe_int(db_order.get('reorder_after_cancel'), 0)):
+                        snapshot = self._build_reorder_snapshot_from_db_order(db_order)
+                        if self._should_reorder_grid_order(snapshot):
+                            logger.warning(
+                                f"[网格] 废单后按库内快照重挂一次 委托号={order_id}, "
+                                f"stock={snapshot.get('stock_code')}, side={snapshot.get('side')}"
+                            )
+                            try:
+                                threading.Thread(
+                                    target=self._run_grid_reorder_after_cancel,
+                                    args=(snapshot,), daemon=True,
+                                    name=f"GridReorder-{order_id}"
+                                ).start()
+                            except Exception as reorder_err:
+                                logger.error(
+                                    f"[网格] 启动废单重挂线程失败 委托号={order_id}, err={reorder_err}"
+                                )
+                return True
             if pending.get('status') == 'reordering':
                 return True
 
@@ -2845,8 +2914,17 @@ class GridTradingManager:
                 return False
 
             session = self._find_session_by_id(pending.get('session_id'))
-            if (status == 54 and new_status == 'canceled'
-                    and bool(pending.get('reorder_after_cancel'))
+            is_rejected = (status == 57 and filled_volume == 0)
+            if is_rejected:
+                # 废单未成交：清掉提交时写入的冷却，避免白等 GRID_*_COOLDOWN 秒
+                self._clear_grid_cooldown_unlocked(
+                    pending.get('session_id'), pending.get('side'))
+            should_reorder = (
+                self._should_reorder_grid_order(pending) if is_rejected
+                else (status == 54 and new_status == 'canceled'
+                      and bool(pending.get('reorder_after_cancel')))
+            )
+            if (should_reorder
                     and not pending.get('stop_requested')
                     and session and session.status == 'active'):
                 reorder_snapshot = dict(pending)

@@ -1,8 +1,11 @@
+import inspect
 import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
 from strategy import TradingStrategy
+from trading_executor import TradingExecutor
+from xtquant import xtconstant
 import config
 
 
@@ -23,11 +26,15 @@ class TestStrategyBuyPriceType(unittest.TestCase):
             ok = strategy.execute_buy_strategy("002815.SZ", buy_signal=True)
 
         self.assertTrue(ok)
+        # 价格类型不再由调用方硬编码，统一走执行器默认值 11=FIX_PRICE
         strategy.trading_executor.buy_stock.assert_called_once_with(
             "002815.SZ",
             amount=10000,
-            price_type=5,
         )
+        default_price_type = inspect.signature(
+            TradingExecutor.buy_stock).parameters['price_type'].default
+        self.assertEqual(default_price_type, xtconstant.FIX_PRICE,
+                         "实盘买入默认必须为 11=FIX_PRICE，否则定价权会交回 QMT 客户端")
 
     def test_global_monitor_disabled_short_circuits_strategy_execution(self):
         strategy = TradingStrategy.__new__(TradingStrategy)

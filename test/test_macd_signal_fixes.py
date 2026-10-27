@@ -144,8 +144,9 @@ class TestMacdSellSwitchNoPoisoning(unittest.TestCase):
             second = strategy.execute_sell_strategy("000001.SZ", sell_signal=True)
 
         self.assertTrue(second, "开关打开后当日信号必须可执行（修复前会被 processed_signals 拦住）")
+        # 价格类型走执行器默认值 11=FIX_PRICE，调用方不再硬编码
         strategy.trading_executor.sell_stock.assert_called_once_with(
-            "000001.SZ", 1000, price_type=5,
+            "000001.SZ", 1000,
         )
 
     def test_switch_off_logs_only_once_per_day(self):
@@ -243,7 +244,7 @@ class TestMacdSellUsesAvailable(unittest.TestCase):
 
         self.assertTrue(result)
         strategy.trading_executor.sell_stock.assert_called_once_with(
-            "000001.SZ", 600, price_type=5,
+            "000001.SZ", 600,
         )
 
     def test_zero_available_skips_order(self):

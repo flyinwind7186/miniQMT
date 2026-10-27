@@ -9,6 +9,7 @@ import numpy as np
 import sqlite3
 from xtquant import xtdata as xt
 from xtquant import xttrader as xtt
+from xtquant import xtconstant as xtc
 
 import config
 import Methods
@@ -163,6 +164,48 @@ class TradingExecutor:
         if fixed_price_type and price_value > 0:
             return price_value
         return None
+
+    def _clamp_order_price_to_daily_limits(self, stock_code, price, side):
+        """把限价委托价夹到当日涨跌停区间内。
+
+        改用限价委托(price_type=11)后，委托价会原样送到交易所。若取价快照过期，
+        或滑点把价格推出区间（例如跌停时"买三价-0.01"低于跌停价），交易所会直接
+        废单。涨跌停价取自 xtdata.get_instrument_detail，主板/创业板/科创板/北交所
+        与 ST 股自动正确。夹取时预留滑点余量，保证滑点后仍落在区间内。
+        """
+        try:
+            price_value = float(price)
+        except (TypeError, ValueError):
+            return price
+
+        try:
+            detail = xt.get_instrument_detail(stock_code)
+            up_stop = float((detail or {}).get('UpStopPrice') or 0)
+            down_stop = float((detail or {}).get('DownStopPrice') or 0)
+        except Exception as e:
+            logger.warning(f"{stock_code} 获取涨跌停价失败，保持原价 {price_value:.2f}: {e}")
+            return price
+
+        if up_stop <= 0 or down_stop <= 0:
+            return price
+
+        try:
+            slippage = abs(float(getattr(self.position_manager.qmt_trader, 'slippage', 0.0) or 0.0))
+        except (TypeError, ValueError):
+            slippage = 0.0
+
+        lower = down_stop + slippage
+        upper = up_stop - slippage
+        if lower > upper:
+            lower, upper = down_stop, up_stop
+
+        clamped = min(max(price_value, lower), upper)
+        if abs(clamped - price_value) > 1e-9:
+            logger.warning(
+                f"{stock_code} {side}委托价 {price_value:.2f} 超出当日涨跌停区间 "
+                f"[{down_stop:.2f}, {up_stop:.2f}]，已夹取为 {clamped:.2f}"
+            )
+        return clamped
 
     def _register_resolved_unknown_order_submission(self, stock_code, side, order_id, info):
         """未知异步委托迟到映射后，补齐最小订单缓存和本地跟踪。"""
@@ -1613,17 +1656,18 @@ class TradingExecutor:
 
         return formatted_code
 
-    def buy_stock(self, stock_code, volume=None, price=None, amount=None, price_type=5,
+    def buy_stock(self, stock_code, volume=None, price=None, amount=None, price_type=xtc.FIX_PRICE,
                   callback=None, strategy='default', signal_type=None, signal_info=None):
         """
         买入股票
-        
+
         参数:
         stock_code (str): 股票代码
         volume (int): 买入数量，与amount二选一
         price (float): 买入价格，为None时使用卖三价
         amount (float): 买入金额，与volume二选一
-        price_type (int): 价格类型，默认为5（特定的限价类型）
+        price_type (int): 价格类型，默认 11=FIX_PRICE(限价)。限价单由交易所接收
+                          我们传入的价格；5=LATEST_PRICE 会把定价权交给 QMT 客户端。
         callback (function): 成交回调函数
         strategy (str): 策略标识
         signal_type (str): 信号类型（可选，用于委托单跟踪）
@@ -1727,6 +1771,10 @@ class TradingExecutor:
                 if price is None or price <= 0:
                     logger.error(f"无法获取有效的买入价格，交易取消")
                     return None
+
+                # 实盘限价委托：夹取到当日涨跌停区间，避免越界被交易所废单
+                if not is_simulation:
+                    price = self._clamp_order_price_to_daily_limits(formatted_stock_code, price, '买入')
                 
                 # 如果指定了金额而不是数量，计算数量
                 if strategy not in ('M_real', 'M_simu', 'manual', 'manual_real', 'manual_simu'):
@@ -1933,7 +1981,7 @@ class TradingExecutor:
                 logger.error(f"买入 {stock_code} 时出错: {str(e)}")
                 return None
     
-    def sell_stock(self, stock_code, volume=None, price=None, ratio=None, price_type=5, callback=None, strategy='default', signal_type=None, signal_info=None):
+    def sell_stock(self, stock_code, volume=None, price=None, ratio=None, price_type=xtc.FIX_PRICE, callback=None, strategy='default', signal_type=None, signal_info=None):
         """
         卖出股票
 
@@ -1942,7 +1990,8 @@ class TradingExecutor:
         volume (int): 卖出数量，与ratio二选一
         price (float): 卖出价格，为None时使用买三价
         ratio (float): 卖出比例，0-1之间，与volume二选一
-        price_type (int): 价格类型，默认为5（特定的限价类型）
+        price_type (int): 价格类型，默认 11=FIX_PRICE(限价)。限价单由交易所接收
+                          我们传入的价格；5=LATEST_PRICE 会把定价权交给 QMT 客户端。
         callback (function): 成交回调函数
         strategy (str): 策略标识
         signal_type (str): 信号类型（可选，用于委托单跟踪）
@@ -2032,6 +2081,10 @@ class TradingExecutor:
                 if price is None or price <= 0:
                     logger.error(f"无法获取有效的卖出价格，交易取消")
                     return None
+
+                # 实盘限价委托：夹取到当日涨跌停区间，避免越界被交易所废单
+                if not is_simulation:
+                    price = self._clamp_order_price_to_daily_limits(formatted_stock_code, price, '卖出')
                 
                 # 如果指定了比例而不是数量，计算数量
                 if volume is None and ratio is not None:

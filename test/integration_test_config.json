@@ -122,10 +122,11 @@
     },
     "order_rejection": {
       "name": "QMT拒单保护测试",
-      "description": "验证order_id=-1时不保存交易记录，以及自适应卖出冷却缩短逻辑",
+      "description": "验证order_id=-1时不保存交易记录、自适应卖出冷却缩短，以及实盘限价委托(price_type=11)/涨跌停夹取/废单(57)单次重挂",
       "modules": [
         "test.test_order_rejection",
-        "test.test_grid_trade_sell"
+        "test.test_grid_trade_sell",
+        "test.test_live_order_price_guard"
       ],
       "priority": "critical"
     },

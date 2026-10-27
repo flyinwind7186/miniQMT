@@ -198,7 +198,6 @@ class TradingStrategy:
                 order_id = self.trading_executor.buy_stock(
                     stock_code,
                     amount=add_amount,
-                    price_type=5,
                     strategy='add_position',
                     signal_type='add_position',
                     signal_info={
@@ -307,7 +306,7 @@ class TradingStrategy:
                 # 实盘交易功能
                 # 🔑 新增：传递信号信息用于委托单跟踪
                 order_id = self.trading_executor.sell_stock(
-                    stock_code, volume, price_type=5, strategy='stop_loss',
+                    stock_code, volume, strategy='stop_loss',
                     signal_type='stop_loss',
                     signal_info={
                         'current_price': current_price,
@@ -413,7 +412,7 @@ class TradingStrategy:
                 # 实盘交易
                 # 🔑 新增：传递信号信息用于委托单跟踪
                 order_id = self.trading_executor.sell_stock(
-                    stock_code, sell_volume, price_type=5, strategy='auto_partial',
+                    stock_code, sell_volume, strategy='auto_partial',
                     signal_type='take_profit_half',
                     signal_info={
                         'current_price': current_price,
@@ -479,7 +478,7 @@ class TradingStrategy:
                 # 实盘交易
                 # 🔑 新增：传递信号信息用于委托单跟踪
                 order_id = self.trading_executor.sell_stock(
-                    stock_code, volume, price_type=5, strategy='auto_full',
+                    stock_code, volume, strategy='auto_full',
                     signal_type='take_profit_full',
                     signal_info={
                         'current_price': current_price,
@@ -619,7 +618,7 @@ class TradingStrategy:
                     logger.info(f"执行 {stock_code} 首次建仓，金额: {buy_amount:.2f}")
                 
                 # 执行买入：与动态止盈/止损一致走对手价模式，买单由执行器取卖三价
-                order_id = self.trading_executor.buy_stock(stock_code, amount=buy_amount, price_type=5)
+                order_id = self.trading_executor.buy_stock(stock_code, amount=buy_amount)
                 
                 if order_id:
                     # 记录已处理信号
@@ -690,9 +689,9 @@ class TradingStrategy:
                     )
                     return False
 
-                # 执行卖出（price_type=5=LATEST_PRICE；旧值0为非法枚举，QMT客户端会本地拒绝且不产生废单）
+                # 执行卖出（价格类型走执行器默认值 11=FIX_PRICE 限价；5=LATEST_PRICE 会把定价权交给QMT客户端）
                 logger.info(f"执行 {stock_code} 卖出策略，数量: {volume}")
-                order_id = self.trading_executor.sell_stock(stock_code, volume, price_type=5)
+                order_id = self.trading_executor.sell_stock(stock_code, volume)
 
                 if order_id:
                     # 记录已处理信号

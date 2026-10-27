@@ -25,6 +25,13 @@ class TestOrderRejection(unittest.TestCase):
         self.orig_sim = config.ENABLE_SIMULATION_MODE
         self.orig_confirm = getattr(config, 'GRID_CONFIRM_LIVE_ORDER_BY_DEAL', True)
         config.ENABLE_SIMULATION_MODE = False  # 实盘模式才走 order_id 路径
+        # 本模块使用虚构价格，需把当日涨跌停放开，避免限价夹取改变断言值
+        self._limit_patch = patch(
+            'xtquant.xtdata.get_instrument_detail',
+            return_value={'UpStopPrice': 1e6, 'DownStopPrice': 0.01}
+        )
+        self._limit_patch.start()
+        self.addCleanup(self._limit_patch.stop)
 
     def tearDown(self):
         config.ENABLE_SIMULATION_MODE = self.orig_sim

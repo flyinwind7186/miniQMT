@@ -112,9 +112,11 @@ class MyXtQuantTraderCallback(XtQuantTraderCallback):
         :param order: XtOrder对象
         :return:
         """
+        status_msg = str(getattr(order, 'status_msg', '') or '').strip()
         logger.info(f"委托回报: 股票代码={order.stock_code}, 委托号={order.order_id}, "
             f"委托状态={config.ORDER_STATUS_LABELS.get(order.order_status, '未知')}({order.order_status}), "
-            f"柜台编号={order.order_sysid}")
+            f"柜台编号={order.order_sysid}"
+            + (f", 状态说明={status_msg}" if status_msg else ""))
         if self.detached:
             logger.info("已失效的旧 callback 收到委托回报，忽略")
             return
