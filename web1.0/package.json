@@ -1,0 +1,10 @@
+{
+  "name": "miniqmt-web1-styles",
+  "private": true,
+  "scripts": {
+    "build:css": "tailwindcss -c tailwind.config.cjs -i tailwind.input.css -o static/tailwind.min.css --minify"
+  },
+  "devDependencies": {
+    "tailwindcss": "3.4.19"
+  }
+}

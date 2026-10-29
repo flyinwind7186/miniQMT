@@ -25,6 +25,7 @@ Web API 完整功能测试脚本
 import sys
 import os
 import json
+import re
 import unittest
 import sqlite3
 import time
@@ -411,6 +412,55 @@ class TestStaticAndIndex(WebAPITestBase):
             status_code=resp.status_code,
             duration_ms=ms,
         )
+
+    def test_02_index_resources_are_local_and_available(self):
+        """首页只引用本地资源，样式和脚本均可通过 Flask 获取。"""
+        resp, _ = self._get('/')
+        self.assertEqual(resp.status_code, 200)
+        html = resp.get_data(as_text=True)
+        self.assertLess(html.index('</style>'), html.index('href="static/tailwind.min.css'),
+                        '工具类必须在自定义样式之后加载，保持 hidden 等状态类生效')
+        resources = re.findall(r'(?:src|href)="([^"]+)"', html)
+        self.assertTrue(any('.css' in url for url in resources))
+        for url in resources:
+            with self.subTest(url=url):
+                self.assertFalse(url.startswith(('http://', 'https://', '//')))
+                with self.client.get('/' + url.lstrip('/')) as asset:
+                    self.assertEqual(asset.status_code, 200)
+
+    def test_03_compiled_css_covers_dynamic_styles(self):
+        """预编译产物必须包含由 JS 切换和插入的样式。"""
+        with self.client.get('/static/tailwind.min.css') as resp:
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(resp.mimetype, 'text/css')
+            css = resp.get_data(as_text=True)
+        for selector in (
+            '.hidden', '.bg-orange-600', '.bg-cyan-600', '.h-40',
+            '.hover\\:bg-orange-700:hover', '.text-green-800',
+        ):
+            with self.subTest(selector=selector):
+                self.assertIn(selector, css)
+        self.assertNotIn('@tailwind', css)
+        self.assertNotIn('@import', css)
+
+    def test_04_stylesheet_update_changes_index_resource_url(self):
+        """CSS 文件更新后，首页必须下发新 URL，避免浏览器使用旧样式。"""
+        original_getmtime = os.path.getmtime
+        urls = []
+        for css_mtime in (1000000000, 1000000001):
+            def getmtime(path):
+                if str(path).endswith('tailwind.min.css'):
+                    return css_mtime
+                return original_getmtime(path)
+
+            with patch.object(web_server.os.path, 'getmtime', side_effect=getmtime):
+                resp, _ = self._get('/')
+            self.assertEqual(resp.headers['Cache-Control'], 'no-store')
+            match = re.search(r'href="([^"]+\.css\?v=[^"]+)"',
+                              resp.get_data(as_text=True))
+            self.assertIsNotNone(match, '首页必须为本地 CSS 加入版本参数')
+            urls.append(match.group(1))
+        self.assertNotEqual(urls[0], urls[1])
 
 
 # =====================================================================

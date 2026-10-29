@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MiniQMT - %MINIQMT_RELEASE_VERSION%</title>
-    <script src="https://cdn.tailwindcss.com"></script>
     <style>
         /* 基础样式 */
         body {
@@ -593,6 +592,8 @@
           color: #9a3412;
         }
     </style>
+    <!-- 工具类在自定义样式之后加载，确保 hidden 等状态类生效。 -->
+    <link rel="stylesheet" href="static/tailwind.min.css">
 </head>
 <body class="bg-gray-100 p-4">
     <div id="connectionStatus" class="connection-status disconnected">API未连接</div>

@@ -450,11 +450,9 @@ stop_push_flag = False
 
 @app.route('/')
 def index():
-    """Serve the index.html file with cache-busted script.js reference.
+    """提供首页，并按文件修改时间更新 JS/CSS 资源版本。
 
-    给 script.js 的引用注入基于文件 mtime 的版本号 (?v=<mtime>)，
-    JS 文件一变 URL 即变，浏览器必然重新加载新版本——彻底避免
-    "改了前端逻辑但浏览器仍跑旧 script.js" 导致的刷新行为不一致。
+    资源文件更新时 URL 随之变化，避免浏览器继续使用旧脚本或样式。
     """
     web_dir = os.path.join(os.path.dirname(__file__), webpage_dir)
     index_path = os.path.join(web_dir, 'index.html')
@@ -464,6 +462,10 @@ def index():
         script_path = os.path.join(web_dir, 'script.js')
         version = str(int(os.path.getmtime(script_path)))
         html = html.replace('src="script.js"', f'src="script.js?v={version}"')
+        css_path = os.path.join(web_dir, 'static', 'tailwind.min.css')
+        css_version = str(int(os.path.getmtime(css_path)))
+        html = html.replace('href="static/tailwind.min.css"',
+                            f'href="static/tailwind.min.css?v={css_version}"')
         html = html.replace(RELEASE_VERSION_PLACEHOLDER, get_release_version())
         resp = make_response(html)
         resp.headers['Content-Type'] = 'text/html; charset=utf-8'
